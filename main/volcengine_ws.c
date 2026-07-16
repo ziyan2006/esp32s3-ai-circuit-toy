@@ -279,7 +279,7 @@ static void handle_protocol_event(uint32_t event, const uint8_t *payload, size_t
         case VOLC_EVENT_CONNECTION_STARTED:
             s_protocol_ready = true;
             ESP_LOGI(TAG, "Protocol connection established");
-            ui_update_status("Ready!\nHold BOOT button to speak.");
+            ui_update_status("Ready!\nPress BOOT to start recording.");
             break;
         case VOLC_EVENT_CONNECTION_FAILED:
             ESP_LOGE(TAG, "Protocol connection failed");
@@ -302,7 +302,7 @@ static void handle_protocol_event(uint32_t event, const uint8_t *payload, size_t
             s_session_closing = false;
             ESP_LOGI(TAG, "AI session finished");
             if (!s_session_cancelled) {
-                ui_update_status("Ready!\nHold BOOT button to speak.");
+                ui_update_status("Ready!\nPress BOOT to start recording.");
             }
             s_session_cancelled = false;
             s_asr_activity = false;
@@ -420,9 +420,9 @@ static void parse_binary_frame(const uint8_t *data, size_t len)
             payload_contains(payload, payload_len, "DialogAudioIdleTimeoutError")) {
             if (s_tts_completed) {
                 ESP_LOGW(TAG, "Ignoring audio idle timeout after completed TTS response");
-                ui_update_status("Ready!\nHold BOOT button to speak.");
+                ui_update_status("Ready!\nPress BOOT to start recording.");
             } else {
-                ui_update_status("No speech detected.\nHold BOOT and try again.");
+                ui_update_status("No speech detected.\nPress BOOT to try again.");
             }
             s_tts_completed = false;
             return;

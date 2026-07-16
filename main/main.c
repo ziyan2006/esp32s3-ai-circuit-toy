@@ -22,6 +22,13 @@ static const char *TAG = "MAIN_APP";
 #define VOLUME_STEP_PERCENT 5
 #define MIN_SPEECH_FRAMES 10
 #define ASR_ACTIVITY_TIMEOUT_MS 4000
+#define TALK_BUTTON_DEBOUNCE_MS 120
+
+typedef enum {
+    TALK_STATE_READY,
+    TALK_STATE_RECORDING,
+    TALK_STATE_WAITING_RESPONSE,
+} talk_state_t;
 
 // LVGL Label handle to show statuses on screen
 static lv_obj_t *s_wifi_status_label = NULL;
@@ -132,10 +139,12 @@ static void talk_control_task(void *pvParameters)
 
     ESP_LOGI(TAG, "==================================================");
     ESP_LOGI(TAG, " Talk Control Task Started.");
-    ESP_LOGI(TAG, " Hold BOOT button (GPIO 0) to talk, release to send.");
+    ESP_LOGI(TAG, " Press BOOT to start recording, press again to send.");
     ESP_LOGI(TAG, "==================================================");
 
-    bool is_recording = false;
+    talk_state_t talk_state = TALK_STATE_READY;
+    bool previous_button_pressed = gpio_get_level(TALK_BUTTON_GPIO) == 0;
+    TickType_t last_button_event = xTaskGetTickCount() - pdMS_TO_TICKS(TALK_BUTTON_DEBOUNCE_MS);
     size_t recorded_bytes = 0;
     size_t sent_bytes = 0;
     uint32_t recorded_frames = 0;
@@ -147,7 +156,16 @@ static void talk_control_task(void *pvParameters)
     TickType_t asr_wait_started = 0;
 
     while (1) {
-        if (awaiting_asr_activity) {
+        bool button_pressed = gpio_get_level(TALK_BUTTON_GPIO) == 0;
+        TickType_t now = xTaskGetTickCount();
+        bool button_event = button_pressed && !previous_button_pressed &&
+                            (now - last_button_event) >= pdMS_TO_TICKS(TALK_BUTTON_DEBOUNCE_MS);
+        previous_button_pressed = button_pressed;
+        if (button_event) {
+            last_button_event = now;
+        }
+
+        if (talk_state == TALK_STATE_WAITING_RESPONSE && awaiting_asr_activity) {
             if (volcengine_ws_has_asr_activity()) {
                 awaiting_asr_activity = false;
             } else if ((xTaskGetTickCount() - asr_wait_started) >= pdMS_TO_TICKS(ASR_ACTIVITY_TIMEOUT_MS)) {
@@ -162,38 +180,84 @@ static void talk_control_task(void *pvParameters)
             }
         }
 
-        // BOOT Button is active low
-        if (gpio_get_level(TALK_BUTTON_GPIO) == 0) {
-            if (awaiting_asr_activity) {
-                vTaskDelay(pdMS_TO_TICKS(50));
-                continue;
-            }
-            if (!is_recording) {
-                ui_update_status("Starting AI session...");
-                esp_err_t session_ret = volcengine_ws_prepare_session();
-                if (session_ret != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to prepare AI session: %s", esp_err_to_name(session_ret));
-                    ui_update_status("AI session start failed.\nRelease and try again.");
-                    while (gpio_get_level(TALK_BUTTON_GPIO) == 0) {
-                        vTaskDelay(pdMS_TO_TICKS(50));
-                    }
-                    vTaskDelay(pdMS_TO_TICKS(200));
-                    continue;
-                }
-                is_recording = true;
-                recorded_bytes = 0;
-                sent_bytes = 0;
-                recorded_frames = 0;
-                first_send_error = ESP_OK;
-                sample_abs_sum = 0;
-                sample_count = 0;
-                sample_peak = 0;
-                ui_update_status(">>> Recording...");
-                ESP_LOGI(TAG, "[PTT] >>> Recording started... Speak now!");
-            }
+        if (talk_state == TALK_STATE_WAITING_RESPONSE &&
+            !volcengine_ws_is_session_active()) {
+            talk_state = TALK_STATE_READY;
+            awaiting_asr_activity = false;
+            ESP_LOGI(TAG, "AI turn finished; BOOT is ready for the next recording");
+        }
 
+        if (button_event) {
+            if (talk_state == TALK_STATE_READY) {
+                if (volcengine_ws_is_session_active()) {
+                    ESP_LOGI(TAG, "Ignoring BOOT press while AI session is active");
+                } else {
+                    ui_update_status("Starting AI session...");
+                    esp_err_t session_ret = volcengine_ws_prepare_session();
+                    if (session_ret != ESP_OK) {
+                        ESP_LOGE(TAG, "Failed to prepare AI session: %s", esp_err_to_name(session_ret));
+                        ui_update_status("AI session start failed.\nPress BOOT to try again.");
+                    } else {
+                        recorded_bytes = 0;
+                        sent_bytes = 0;
+                        recorded_frames = 0;
+                        first_send_error = ESP_OK;
+                        sample_abs_sum = 0;
+                        sample_count = 0;
+                        sample_peak = 0;
+                        talk_state = TALK_STATE_RECORDING;
+                        ui_update_status(">>> Recording...\nPress BOOT again to stop.");
+                        ESP_LOGI(TAG, "[TOGGLE] >>> Recording started. Press BOOT again to stop.");
+                    }
+                }
+            } else if (talk_state == TALK_STATE_RECORDING) {
+                talk_state = TALK_STATE_WAITING_RESPONSE;
+                uint32_t mean_abs = sample_count > 0 ? (uint32_t)(sample_abs_sum / sample_count) : 0;
+                ESP_LOGI(TAG,
+                         "[TOGGLE] <<< Recording stopped. frames=%lu recorded=%u sent=%u mean_abs=%lu peak=%lu first_send_error=%s",
+                         (unsigned long)recorded_frames,
+                         (unsigned int)recorded_bytes,
+                         (unsigned int)sent_bytes,
+                         (unsigned long)mean_abs,
+                         (unsigned long)sample_peak,
+                         esp_err_to_name(first_send_error));
+
+                bool recording_too_short = recorded_frames < MIN_SPEECH_FRAMES;
+                bool audio_send_failed = sent_bytes == 0 || first_send_error != ESP_OK;
+                if (recording_too_short || audio_send_failed) {
+                    ESP_LOGW(TAG,
+                             "Discarding invalid speech turn: too_short=%d send_failed=%d",
+                             recording_too_short, audio_send_failed);
+                    esp_err_t cancel_ret = volcengine_ws_cancel_session();
+                    if (cancel_ret != ESP_OK) {
+                        ESP_LOGW(TAG, "Failed to cancel invalid speech session: %s",
+                                 esp_err_to_name(cancel_ret));
+                    }
+                    awaiting_asr_activity = false;
+                    ui_update_status(recording_too_short
+                                         ? "Too short.\nPress BOOT to try again."
+                                         : "Audio send failed.\nPress BOOT to try again.");
+                } else if (volcengine_ws_is_connected()) {
+                    esp_err_t commit_ret = volcengine_ws_commit_and_respond();
+                    if (commit_ret == ESP_OK) {
+                        ui_update_status("<<< Thinking...");
+                        if (!volcengine_ws_has_asr_activity()) {
+                            awaiting_asr_activity = true;
+                            asr_wait_started = xTaskGetTickCount();
+                        }
+                    } else {
+                        ESP_LOGE(TAG, "Failed to request AI response: %s", esp_err_to_name(commit_ret));
+                        ui_update_status("Request failed.\nPress BOOT to try again.");
+                    }
+                } else {
+                    awaiting_asr_activity = false;
+                    ui_update_status("AI connection lost.\nPress BOOT to reconnect.");
+                }
+            }
+        }
+
+        if (talk_state == TALK_STATE_RECORDING) {
             size_t bytes_read = 0;
-            // Capture audio frame from Codec
             esp_err_t ret = audio_record_frame(rec_buffer, 1024, &bytes_read, pdMS_TO_TICKS(100));
             if (ret == ESP_OK && bytes_read > 0) {
                 recorded_frames++;
@@ -221,50 +285,8 @@ static void talk_control_task(void *pvParameters)
             } else if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Audio recording failed: %s", esp_err_to_name(ret));
             }
-        } 
-        else {
-            if (is_recording) {
-                is_recording = false;
-                uint32_t mean_abs = sample_count > 0 ? (uint32_t)(sample_abs_sum / sample_count) : 0;
-                ESP_LOGI(TAG,
-                         "[PTT] <<< Recording stopped. frames=%lu recorded=%u sent=%u mean_abs=%lu peak=%lu first_send_error=%s",
-                         (unsigned long)recorded_frames,
-                         (unsigned int)recorded_bytes,
-                         (unsigned int)sent_bytes,
-                         (unsigned long)mean_abs,
-                         (unsigned long)sample_peak,
-                         esp_err_to_name(first_send_error));
-
-                bool recording_too_short = recorded_frames < MIN_SPEECH_FRAMES;
-                bool audio_send_failed = sent_bytes == 0 || first_send_error != ESP_OK;
-                if (recording_too_short || audio_send_failed) {
-                    ESP_LOGW(TAG,
-                             "Discarding invalid speech turn: too_short=%d send_failed=%d",
-                             recording_too_short, audio_send_failed);
-                    esp_err_t cancel_ret = volcengine_ws_cancel_session();
-                    if (cancel_ret != ESP_OK) {
-                        ESP_LOGW(TAG, "Failed to cancel invalid speech session: %s",
-                                 esp_err_to_name(cancel_ret));
-                    }
-                    ui_update_status(recording_too_short
-                                         ? "Too short.\nHold BOOT longer and try again."
-                                         : "No clear speech detected.\nPlease try again.");
-                } else if (volcengine_ws_is_connected()) {
-                    esp_err_t commit_ret = volcengine_ws_commit_and_respond();
-                    if (commit_ret == ESP_OK) {
-                        ui_update_status("<<< Thinking...");
-                        if (!volcengine_ws_has_asr_activity()) {
-                            awaiting_asr_activity = true;
-                            asr_wait_started = xTaskGetTickCount();
-                        }
-                    } else {
-                        ESP_LOGE(TAG, "Failed to request AI response: %s", esp_err_to_name(commit_ret));
-                        ui_update_status("Request failed.\nPlease try again.");
-                    }
-                }
-                vTaskDelay(pdMS_TO_TICKS(500)); // debounce delay
-            }
-            vTaskDelay(pdMS_TO_TICKS(50)); // poll rate
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
     }
 
@@ -361,7 +383,7 @@ void app_main(void)
     }
 
     if (volcengine_ws_is_connected()) {
-        ui_update_status("Ready!\nHold BOOT button to speak.");
+        ui_update_status("Ready!\nPress BOOT to start recording.");
     } else {
         ui_update_status("Volcano Engine Connection Timeout!");
         return;
