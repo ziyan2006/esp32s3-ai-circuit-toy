@@ -174,6 +174,9 @@ static void talk_control_task(void *pvParameters)
                 if (session_ret != ESP_OK) {
                     ESP_LOGE(TAG, "Failed to prepare AI session: %s", esp_err_to_name(session_ret));
                     ui_update_status("AI session start failed.\nRelease and try again.");
+                    while (gpio_get_level(TALK_BUTTON_GPIO) == 0) {
+                        vTaskDelay(pdMS_TO_TICKS(50));
+                    }
                     vTaskDelay(pdMS_TO_TICKS(200));
                     continue;
                 }

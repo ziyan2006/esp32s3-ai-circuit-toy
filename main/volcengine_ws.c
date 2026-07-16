@@ -52,6 +52,7 @@ static bool s_session_starting = false;
 static bool s_session_closing = false;
 static bool s_session_cancelled = false;
 static bool s_asr_activity = false;
+static bool s_tts_completed = false;
 static char s_session_id[37] = {0};
 static char s_dialog_id[64] = {0};
 static uint8_t *s_rx_buffer = NULL;
@@ -153,6 +154,7 @@ static esp_err_t send_start_session(void)
     s_session_starting = true;
     s_session_cancelled = false;
     s_asr_activity = false;
+    s_tts_completed = false;
     generate_uuid(s_session_id);
 
     cJSON *root = cJSON_CreateObject();
@@ -289,6 +291,7 @@ static void handle_protocol_event(uint32_t event, const uint8_t *payload, size_t
             s_session_closing = false;
             s_session_cancelled = false;
             s_asr_activity = false;
+            s_tts_completed = false;
             ESP_LOGI(TAG, "AI session started successfully");
             update_dialog_id(payload, payload_len);
             log_json_event(event, payload, payload_len);
@@ -303,6 +306,7 @@ static void handle_protocol_event(uint32_t event, const uint8_t *payload, size_t
             }
             s_session_cancelled = false;
             s_asr_activity = false;
+            s_tts_completed = false;
             break;
         case VOLC_EVENT_SESSION_FAILED:
             s_session_starting = false;
@@ -321,6 +325,7 @@ static void handle_protocol_event(uint32_t event, const uint8_t *payload, size_t
             break;
         case VOLC_EVENT_TTS_ENDED:
             log_json_event(event, payload, payload_len);
+            s_tts_completed = true;
             if (send_event_packet(VOLC_MSG_FULL_CLIENT, VOLC_SERIALIZATION_JSON,
                                   VOLC_EVENT_FINISH_SESSION, (const uint8_t *)"{}", 2) == ESP_OK) {
                 s_session_ready = false;
@@ -413,7 +418,13 @@ static void parse_binary_frame(const uint8_t *data, size_t len)
         if (error_code == 55000001 &&
             payload_len > 0 &&
             payload_contains(payload, payload_len, "DialogAudioIdleTimeoutError")) {
-            ui_update_status("No speech detected.\nHold BOOT and try again.");
+            if (s_tts_completed) {
+                ESP_LOGW(TAG, "Ignoring audio idle timeout after completed TTS response");
+                ui_update_status("Ready!\nHold BOOT button to speak.");
+            } else {
+                ui_update_status("No speech detected.\nHold BOOT and try again.");
+            }
+            s_tts_completed = false;
             return;
         }
         char status[96];
@@ -485,6 +496,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
             s_session_closing = false;
             s_session_cancelled = false;
             s_asr_activity = false;
+            s_tts_completed = false;
             ESP_LOGI(TAG, "WebSocket transport connected");
             ui_update_status("WebSocket connected. Authenticating...");
             send_start_connection();
@@ -497,6 +509,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
             s_session_closing = false;
             s_session_cancelled = false;
             s_asr_activity = false;
+            s_tts_completed = false;
             ESP_LOGW(TAG, "WebSocket disconnected");
             ui_update_status("WebSocket disconnected. Reconnecting...");
             break;
@@ -560,6 +573,52 @@ esp_err_t volcengine_ws_connect(void)
     return esp_websocket_client_start(s_ws_client);
 }
 
+static esp_err_t ensure_protocol_connection(void)
+{
+    if (s_ws_client == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (esp_websocket_client_is_connected(s_ws_client) &&
+        s_transport_connected && s_protocol_ready) {
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "WebSocket connection is stale; restarting client");
+    s_transport_connected = false;
+    s_protocol_ready = false;
+    s_session_ready = false;
+    s_session_starting = false;
+    s_session_closing = false;
+    s_session_cancelled = false;
+    s_asr_activity = false;
+    s_tts_completed = false;
+    ui_update_status("Reconnecting to AI service...");
+
+    esp_err_t stop_ret = esp_websocket_client_stop(s_ws_client);
+    if (stop_ret != ESP_OK) {
+        ESP_LOGW(TAG, "WebSocket stop before restart returned: %s",
+                 esp_err_to_name(stop_ret));
+    }
+
+    esp_err_t start_ret = esp_websocket_client_start(s_ws_client);
+    if (start_ret != ESP_OK) {
+        ESP_LOGE(TAG, "WebSocket restart failed: %s", esp_err_to_name(start_ret));
+        return start_ret;
+    }
+
+    for (int retry = 0; retry < 200; retry++) {
+        if (esp_websocket_client_is_connected(s_ws_client) &&
+            s_transport_connected && s_protocol_ready) {
+            ESP_LOGI(TAG, "WebSocket protocol connection restored");
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    ESP_LOGE(TAG, "Timed out while restoring WebSocket protocol connection");
+    return ESP_ERR_TIMEOUT;
+}
+
 esp_err_t volcengine_ws_send_audio(const uint8_t *data, size_t size)
 {
     if (!s_session_ready || data == NULL || size == 0) {
@@ -571,8 +630,9 @@ esp_err_t volcengine_ws_send_audio(const uint8_t *data, size_t size)
 
 esp_err_t volcengine_ws_prepare_session(void)
 {
-    if (!s_transport_connected || !s_protocol_ready) {
-        return ESP_ERR_INVALID_STATE;
+    esp_err_t connection_ret = ensure_protocol_connection();
+    if (connection_ret != ESP_OK) {
+        return connection_ret;
     }
     if (s_session_ready) {
         return ESP_OK;
@@ -629,7 +689,9 @@ esp_err_t volcengine_ws_cancel_session(void)
 
 bool volcengine_ws_is_connected(void)
 {
-    return s_transport_connected && s_protocol_ready;
+    return s_ws_client != NULL &&
+           esp_websocket_client_is_connected(s_ws_client) &&
+           s_transport_connected && s_protocol_ready;
 }
 
 bool volcengine_ws_has_asr_activity(void)
