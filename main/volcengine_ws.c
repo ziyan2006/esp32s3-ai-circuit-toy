@@ -694,6 +694,11 @@ bool volcengine_ws_is_connected(void)
            s_transport_connected && s_protocol_ready;
 }
 
+bool volcengine_ws_is_session_active(void)
+{
+    return s_session_starting || s_session_ready || s_session_closing;
+}
+
 bool volcengine_ws_has_asr_activity(void)
 {
     return s_asr_activity;

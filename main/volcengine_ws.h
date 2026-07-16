@@ -42,6 +42,11 @@ esp_err_t volcengine_ws_prepare_session(void);
 bool volcengine_ws_is_connected(void);
 
 /**
+ * @brief Check whether an AI session is starting, active, or closing.
+ */
+bool volcengine_ws_is_session_active(void);
+
+/**
  * @brief Check whether the server has recognized speech in the current session.
  */
 bool volcengine_ws_has_asr_activity(void);
