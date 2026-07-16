@@ -1,0 +1,25 @@
+# ESP-IDF generated output and downloaded components
+/build/
+/managed_components/
+sdkconfig.old
+
+# Local credentials
+/main/config.h
+
+# Local analysis and reference material
+/.codegraph/
+/.reference-*
+
+# Python caches and generated probe artifacts
+__pycache__/
+*.py[cod]
+/scratch/downloads/
+/scratch/*.log
+/scratch/*.err
+/scratch/*.wav
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
