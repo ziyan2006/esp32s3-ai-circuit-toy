@@ -389,6 +389,6 @@ void app_main(void)
         return;
     }
 
-    // 6. Spawn the Push-to-Talk task
+    // 6. Spawn the toggle-recording control task
     xTaskCreatePinnedToCore(talk_control_task, "talk_control_task", 4096, NULL, 5, NULL, 0);
 }

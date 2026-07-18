@@ -12,6 +12,7 @@ sdkconfig.old
 
 # Python caches and generated probe artifacts
 __pycache__/
+.pytest_cache/
 *.py[cod]
 /scratch/downloads/
 /scratch/*.log
