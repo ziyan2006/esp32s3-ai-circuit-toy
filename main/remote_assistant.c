@@ -18,6 +18,7 @@
 #define REMOTE_TEXT_MAX 512U
 #define REMOTE_REQUEST_TEXT_MAX 384U
 #define REMOTE_RESPONSE_MAX 2048U
+#define REMOTE_TOOL_ONLY_REPLY "请看亮起的提示，再完成这一步。"
 
 static const char *TAG = "remote_assistant";
 typedef struct { uint32_t id; uint16_t level; char text[REMOTE_REQUEST_TEXT_MAX]; } remote_request_t;
@@ -93,25 +94,37 @@ static esp_err_t request_remote(const remote_request_t *request, char *out, size
     if (reply == NULL) return ESP_ERR_INVALID_RESPONSE;
     const cJSON *text = cJSON_GetObjectItemCaseSensitive(reply, "assistant_text");
     const cJSON *tool = cJSON_GetObjectItemCaseSensitive(reply, "tool_call");
-    if (cJSON_IsString(text) && text->valuestring != NULL && text->valuestring[0] != '\0') {
+    const bool has_text = cJSON_IsString(text) && text->valuestring != NULL &&
+                          text->valuestring[0] != '\0';
+    if (has_text) {
         strlcpy(out, text->valuestring, out_size);
+    }
+    const bool has_tool = cJSON_IsObject(tool);
+    if (!has_tool) {
         cJSON_Delete(reply);
-        return ESP_OK;
+        return has_text ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
     }
     const cJSON *name = tool == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(tool, "name");
     const cJSON *arguments = tool == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(tool, "arguments");
     if (!cJSON_IsString(name) || name->valuestring == NULL || arguments == NULL) {
         cJSON_Delete(reply);
-        return ESP_ERR_INVALID_RESPONSE;
+        return has_text ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
     }
     char tool_name[64];
     strlcpy(tool_name, name->valuestring, sizeof(tool_name));
     char *arguments_json = cJSON_PrintUnformatted(arguments);
     cJSON_Delete(reply);
-    if (arguments_json == NULL) return ESP_ERR_NO_MEM;
-    err = tuco_agent_execute_external_tool(request->id, tool_name, arguments_json, out, out_size);
+    if (arguments_json == NULL) return has_text ? ESP_OK : ESP_ERR_NO_MEM;
+    err = tuco_agent_execute_remote_tool(request->id, tool_name, arguments_json);
     cJSON_free(arguments_json);
-    return err;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "remote tool request=%lu name=%s failed: %s",
+                 (unsigned long)request->id, tool_name, esp_err_to_name(err));
+    }
+    if (has_text) return ESP_OK;
+    if (err != ESP_OK) return err;
+    strlcpy(out, REMOTE_TOOL_ONLY_REPLY, out_size);
+    return ESP_OK;
 }
 
 static void remote_task(void *arg)

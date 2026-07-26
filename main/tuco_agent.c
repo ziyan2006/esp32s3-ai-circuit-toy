@@ -493,7 +493,7 @@ static esp_err_t collect_tuco_tools(const claw_core_request_t *request,
 
 static esp_err_t tool_result(char **out_output, esp_err_t result, const char *message)
 {
-    if (out_output != NULL) *out_output = strdup(message);
+    if (out_output != NULL) *out_output = message == NULL ? NULL : strdup(message);
     return result;
 }
 
@@ -572,11 +572,12 @@ static bool select_preferred_empty_slot(const board_snapshot_t *snapshot,
     return true;
 }
 
-static esp_err_t tuco_agent_call_cap(const char *cap_name,
-                                     const char *input_json,
-                                     const claw_core_request_t *request,
-                                     char **out_output,
-                                     void *user_ctx)
+static esp_err_t tuco_agent_execute_tool_cap(const char *cap_name,
+                                             const char *input_json,
+                                             const claw_core_request_t *request,
+                                             char **out_output,
+                                             bool local_feedback,
+                                             void *user_ctx)
 {
     board_snapshot_t snapshot;
     cJSON *root = NULL;
@@ -636,7 +637,7 @@ static esp_err_t tuco_agent_call_cap(const char *cap_name,
         }
         tuco_port_highlight_show(first, second);
         ESP_LOGI(TAG, "highlight request=%lu output=%u input=%u", (unsigned long)request->request_id, first, second);
-        return tool_result(out_output, ESP_OK, TUCO_AGENT_HIGHLIGHT_REPLY);
+        return tool_result(out_output, ESP_OK, local_feedback ? TUCO_AGENT_HIGHLIGHT_REPLY : NULL);
     }
     if (strcmp(cap_name, "highlight_empty_slot") == 0) {
         uint8_t selected_slot = BOARD_SNAPSHOT_SLOT_COUNT;
@@ -681,10 +682,19 @@ static esp_err_t tuco_agent_call_cap(const char *cap_name,
         snprintf(reply, sizeof(reply), "试试在这里放下一个%s积木呢", gate_name_zh(gate));
         ESP_LOGI(TAG, "highlight empty slot request=%lu slot=%u gate=%s", (unsigned long)request->request_id,
                  selected_slot, ssd1315_gate_name(gate));
-        return tool_result(out_output, ESP_OK, reply);
+        return tool_result(out_output, ESP_OK, local_feedback ? reply : NULL);
     }
     cJSON_Delete(root);
     return tool_result(out_output, ESP_ERR_NOT_SUPPORTED, "不支持的工具调用。");
+}
+
+static esp_err_t tuco_agent_call_cap(const char *cap_name,
+                                     const char *input_json,
+                                     const claw_core_request_t *request,
+                                     char **out_output,
+                                     void *user_ctx)
+{
+    return tuco_agent_execute_tool_cap(cap_name, input_json, request, out_output, true, user_ctx);
 }
 
 static char *limited_reply(const char *text)
@@ -1005,14 +1015,15 @@ void tuco_agent_cancel(uint32_t request_id)
     xSemaphoreGive(s_lock);
 }
 
-esp_err_t tuco_agent_execute_external_tool(uint32_t request_id, const char *name,
-                                           const char *arguments_json, char *output,
-                                           size_t output_size)
+static esp_err_t tuco_agent_execute_tool_request(uint32_t request_id, const char *name,
+                                                  const char *arguments_json,
+                                                  bool local_feedback,
+                                                  char **out_tool_output)
 {
     if (s_lock == NULL || request_id == 0U || name == NULL || arguments_json == NULL ||
-        output == NULL || output_size == 0U) return ESP_ERR_INVALID_ARG;
+        out_tool_output == NULL) return ESP_ERR_INVALID_ARG;
+    *out_tool_output = NULL;
     claw_core_request_t request = { .request_id = request_id };
-    char *tool_output = NULL;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_active_request_id != 0U && s_active_request_id != request_id) {
         xSemaphoreGive(s_lock);
@@ -1021,15 +1032,37 @@ esp_err_t tuco_agent_execute_external_tool(uint32_t request_id, const char *name
     s_active_request_id = request_id;
     s_highlight_request_id = 0U;
     xSemaphoreGive(s_lock);
-    const esp_err_t err = tuco_agent_call_cap(name, arguments_json, &request, &tool_output, NULL);
+    const esp_err_t err = tuco_agent_execute_tool_cap(name, arguments_json, &request,
+                                                       out_tool_output, local_feedback, NULL);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_active_request_id == request_id) s_active_request_id = 0U;
+    xSemaphoreGive(s_lock);
+    return err;
+}
+
+esp_err_t tuco_agent_execute_external_tool(uint32_t request_id, const char *name,
+                                           const char *arguments_json, char *output,
+                                           size_t output_size)
+{
+    if (output == NULL || output_size == 0U) return ESP_ERR_INVALID_ARG;
+    char *tool_output = NULL;
+    const esp_err_t err = tuco_agent_execute_tool_request(request_id, name, arguments_json, true,
+                                                           &tool_output);
     if (tool_output != NULL) {
         strlcpy(output, tool_output, output_size);
         free(tool_output);
     } else {
         output[0] = '\0';
     }
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_active_request_id == request_id) s_active_request_id = 0U;
-    xSemaphoreGive(s_lock);
+    return err;
+}
+
+esp_err_t tuco_agent_execute_remote_tool(uint32_t request_id, const char *name,
+                                         const char *arguments_json)
+{
+    char *ignored_output = NULL;
+    const esp_err_t err = tuco_agent_execute_tool_request(request_id, name, arguments_json, false,
+                                                           &ignored_output);
+    free(ignored_output);
     return err;
 }

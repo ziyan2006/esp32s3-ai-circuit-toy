@@ -19,4 +19,6 @@ esp_err_t tuco_agent_build_circuit_snapshot(uint16_t level_id, char **out_json);
 esp_err_t tuco_agent_execute_external_tool(uint32_t request_id, const char *name,
                                            const char *arguments_json, char *output,
                                            size_t output_size);
+esp_err_t tuco_agent_execute_remote_tool(uint32_t request_id, const char *name,
+                                         const char *arguments_json);
 void tuco_agent_serial_start(void);
