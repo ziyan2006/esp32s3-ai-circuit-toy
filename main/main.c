@@ -23,6 +23,8 @@
 #include "baseboard_ir.h"
 #include "block_i2c.h"
 #include "audio_self_test.h"
+#include "assistant_mode.h"
+#include "assistant_router.h"
 #include "board_snapshot.h"
 #include "board_mapping.h"
 #include "circuit_debug.h"
@@ -451,6 +453,7 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "Starting hardware services; IR and WS2812 stay idle until a level starts");
     ESP_ERROR_CHECK(campaign_progress_init());
+    ESP_ERROR_CHECK(assistant_mode_init());
     ESP_ERROR_CHECK(progress_sync_init());
     esp_err_t c6_test_err = c6_network_test_start();
     if (c6_test_err != ESP_OK) {
@@ -461,6 +464,9 @@ void app_main(void)
     tuco_port_highlight_init();
     circuit_debug_init();
     ESP_ERROR_CHECK(game_logic_self_test_run());
+    ESP_ERROR_CHECK(assistant_mode_self_test_run());
+    ESP_ERROR_CHECK(assistant_router_init());
+    ESP_ERROR_CHECK(assistant_router_self_test_run());
     ESP_ERROR_CHECK(tuco_agent_context_self_test_run());
     ESP_ERROR_CHECK(run_shooter_self_tests());
     ESP_ERROR_CHECK(game_judge_init());
