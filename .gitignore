@@ -24,3 +24,9 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# The firmware only consumes the shooter runtime sources. Keep simulator builds,
+# vendored desktop dependencies, and local design artifacts out of this repository.
+/shooter_simulator/*
+!/shooter_simulator/src/
+!/shooter_simulator/src/**

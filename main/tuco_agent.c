@@ -164,25 +164,6 @@ static bool slot_has_any_link(const board_snapshot_t *snapshot, uint8_t slot)
     return false;
 }
 
-static bool snapshot_has_legal_port_pair(const board_snapshot_t *snapshot)
-{
-    for (uint8_t output = 0; output < BOARD_SNAPSHOT_PORT_COUNT; ++output) {
-        const uint8_t output_slot = board_mapping_slot_for_port(output);
-        if (output_slot >= BOARD_SNAPSHOT_SLOT_COUNT || !snapshot->slots[output_slot].present ||
-            !snapshot->slots[output_slot].id_valid || snapshot->port_roles[output] != BOARD_PORT_OUTPUT ||
-            snapshot_port_is_connected(snapshot, output)) continue;
-        for (uint8_t input = 0; input < BOARD_SNAPSHOT_PORT_COUNT; ++input) {
-            const uint8_t input_slot = board_mapping_slot_for_port(input);
-            if (input_slot != output_slot && input_slot < BOARD_SNAPSHOT_SLOT_COUNT &&
-                snapshot->slots[input_slot].present && snapshot->slots[input_slot].id_valid &&
-                snapshot->port_roles[input] == BOARD_PORT_INPUT && !snapshot_port_is_connected(snapshot, input)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 static const char *gate_port_role_name(ssd1315_gate_t gate, board_port_side_t side)
 {
     if (gate == SSD1315_GATE_INPUT) return "output";
@@ -434,6 +415,12 @@ esp_err_t tuco_agent_context_self_test_run(void)
     ESP_RETURN_ON_FALSE(select_preferred_empty_slot(&snapshot, SSD1315_GATE_AND, 0U, &selected_slot) &&
                             selected_slot == 2U,
                         ESP_FAIL, TAG, "gate empty-slot preference");
+    context_self_test_set_slot(&snapshot, 0U, SSD1315_GATE_INPUT);
+    context_self_test_set_slot(&snapshot, 1U, SSD1315_GATE_OUTPUT);
+    selected_slot = BOARD_SNAPSHOT_SLOT_COUNT;
+    ESP_RETURN_ON_FALSE(select_preferred_empty_slot(&snapshot, SSD1315_GATE_NAND, 5U, &selected_slot) &&
+                            selected_slot == 5U,
+                        ESP_FAIL, TAG, "empty-slot prompt with unconnected input and output");
     ESP_LOGI(TAG, "circuit context self-test passed");
     return ESP_OK;
 }
@@ -649,15 +636,14 @@ static esp_err_t tuco_agent_call_cap(const char *cap_name,
         const bool parsed = parse_tool_uint(root, "slot", BOARD_SNAPSHOT_SLOT_COUNT - 1U, &first) &&
                             parse_tool_gate(root, &gate);
         cJSON_Delete(root);
-        if (!parsed || snapshot_has_legal_port_pair(&snapshot) ||
-            gate_name_zh(gate) == NULL || !app_ui_gate_is_unlocked(gate)) {
+        if (!parsed || gate_name_zh(gate) == NULL || !app_ui_gate_is_unlocked(gate)) {
             if (parsed) {
                 ESP_LOGW(TAG,
                          "highlight empty slot rejected request=%lu slot=%u gate=%s topology=%lu "
-                         "legal_pair=%d present=%d linked=%d unlocked=%d",
+                         "present=%d linked=%d unlocked=%d",
                          (unsigned long)request->request_id, first, ssd1315_gate_name(gate),
-                         (unsigned long)snapshot.topology_revision, snapshot_has_legal_port_pair(&snapshot),
-                         snapshot.slots[first].present, slot_has_any_link(&snapshot, first),
+                         (unsigned long)snapshot.topology_revision, snapshot.slots[first].present,
+                         slot_has_any_link(&snapshot, first),
                          app_ui_gate_is_unlocked(gate));
             } else {
                 ESP_LOGW(TAG, "highlight empty slot rejected request=%lu reason=bad_args args=%s",
