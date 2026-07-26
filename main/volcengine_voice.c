@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "audio_self_test.h"
+#include "assistant_mode.h"
 #include "assistant_router.h"
 #include "c6_network_test.h"
 #include "esp_crt_bundle.h"
@@ -15,6 +16,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "cJSON.h"
+#include "remote_assistant.h"
 #include "tuco_agent.h"
 #include "zlib.h"
 
@@ -125,7 +127,9 @@ static void status_set(voice_assistant_state_t state, bool visible, bool error, 
 static bool configured(void)
 {
 #if CONFIG_TUCO_VOLCENGINE_ENABLED
-    return CONFIG_TUCO_VOLCENGINE_API_KEY[0] != '\0' && tuco_agent_is_configured();
+    const bool assistant_configured = assistant_mode_get() == ASSISTANT_MODE_REMOTE ?
+        remote_assistant_is_configured() : tuco_agent_is_configured();
+    return CONFIG_TUCO_VOLCENGINE_API_KEY[0] != '\0' && assistant_configured;
 #else
     return false;
 #endif
@@ -728,7 +732,9 @@ esp_err_t voice_assistant_init(void)
     memset(&s_status, 0, sizeof(s_status)); s_status.state = VOICE_ASSISTANT_DISABLED;
     s_phase = VOICE_READY; s_event_sem = xSemaphoreCreateBinary();
     if (s_event_sem == NULL) return ESP_ERR_NO_MEM;
-    if (!configured()) ESP_LOGW(TAG, "voice disabled until local API key is configured");
+    if (!configured()) {
+        ESP_LOGW(TAG, "voice disabled; configure Volcengine voice key and selected assistant backend");
+    }
     if (xTaskCreate(voice_task, "voice_cloud", 10240, NULL, 4, &s_task) != pdPASS) return ESP_ERR_NO_MEM;
     return ESP_OK;
 }
