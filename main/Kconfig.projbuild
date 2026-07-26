@@ -1,0 +1,125 @@
+menu "TuCo C6 network test"
+
+config TUCO_C6_WIFI_SSID
+    string "Wi-Fi SSID used by the C6 test"
+    default ""
+    help
+        Leave empty to run scan-only mode. Set this and the password to
+        connect the board's on-board ESP32-C6 to a Wi-Fi access point.
+
+config TUCO_C6_WIFI_PASSWORD
+    string "Wi-Fi password used by the C6 test"
+    default ""
+    help
+        Password for the SSID above. It is kept in sdkconfig and can be
+        cleared after the hardware test.
+
+endmenu
+
+menu "TuCo cloud progress sync"
+
+config TUCO_PROGRESS_SYNC_ENABLED
+    bool "Enable manual cloud progress upload"
+    default y
+    help
+        Enables the Settings screen action that uploads the complete 16-level
+        completion snapshot. The device never downloads or applies cloud data.
+
+config TUCO_PROGRESS_SYNC_URL
+    string "Cloud progress sync HTTPS URL"
+    default "https://backend-tuco-d9gwb68lf751e28fd.service.tcloudbase.com/api/device-progress-sync"
+
+config TUCO_PROGRESS_SYNC_SECRET
+    string "Cloud progress sync device secret"
+    default ""
+    help
+        Keep this value only in the local sdkconfig. Do not put it in
+        sdkconfig.defaults, source code, logs, or public documentation.
+
+endmenu
+
+menu "TuCo ESP-Claw agent"
+
+config TUCO_AGENT_ENABLED
+    bool "Enable the embedded ESP-Claw agent"
+    default y
+    help
+        Runs the minimal ESP-Claw Agent Loop after speech recognition. IM,
+        web serving, MCP, persistent memory, Lua, and dynamic skills are not
+        enabled in this firmware stage.
+
+config TUCO_AGENT_DEEPSEEK_API_KEY
+    string "DeepSeek API Key"
+    default ""
+    help
+        Keep this value only in the local sdkconfig. Do not put it in
+        sdkconfig.defaults, source code, logs, or public documentation.
+
+config TUCO_AGENT_DEEPSEEK_BASE_URL
+    string "DeepSeek OpenAI-compatible base URL"
+    default "https://api.deepseek.com/v1"
+
+config TUCO_AGENT_MODEL
+    string "DeepSeek model"
+    default "deepseek-v4-flash"
+
+config TUCO_AGENT_MAX_TOKENS
+    int "Maximum tokens per TuCo reply"
+    range 32 1024
+    default 160
+
+config TUCO_AGENT_CONTEXT_MAX_BYTES
+    int "Maximum in-memory conversation context bytes"
+    range 1024 8192
+    default 4096
+    help
+        Conversation history is kept only while playing one level. When it
+        exceeds this size, it is cleared before the next voice turn.
+
+config TUCO_AGENT_SERIAL_CONSOLE
+    bool "Enable /agent serial test command"
+    default y
+    help
+        On the USB serial console, send /agent followed by Chinese text to
+        test the embedded Agent Loop without recording audio.
+
+endmenu
+
+menu "TuCo cloud voice"
+
+config TUCO_VOLCENGINE_ENABLED
+    bool "Enable Volcengine ASR and TTS voice replay"
+    default y
+    help
+        Transcribes recorded speech and plays the exact recognized text when
+        the local API key is configured.
+        Gameplay remains available when Wi-Fi or the cloud service is offline.
+
+config TUCO_VOLCENGINE_API_KEY
+    string "Volcengine ASR/TTS API Key"
+    default ""
+    help
+        Keep this value only in the local sdkconfig. Do not put it in
+        sdkconfig.defaults, source code, logs, or public documentation.
+
+config TUCO_VOLCENGINE_ASR_WS_URL
+    string "Volcengine streaming ASR WebSocket URL"
+    default "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+
+config TUCO_VOLCENGINE_ASR_RESOURCE_ID
+    string "Volcengine ASR 2.0 resource ID"
+    default "volc.seedasr.sauc.duration"
+
+config TUCO_VOLCENGINE_TTS_WS_URL
+    string "Volcengine streaming TTS WebSocket URL"
+    default "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
+
+config TUCO_VOLCENGINE_TTS_RESOURCE_ID
+    string "Volcengine TTS resource ID"
+    default "seed-tts-2.0"
+
+config TUCO_VOLCENGINE_TTS_VOICE
+    string "Volcengine TTS voice"
+    default "zh_female_vv_uranus_bigtts"
+
+endmenu
