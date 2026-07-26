@@ -5,6 +5,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
+#include "assistant_router.h"
+#include "remote_assistant.h"
 #include "tuco_agent.h"
 
 static const char *TAG = "tuco_agent_serial";
@@ -15,6 +17,7 @@ static void serial_agent_task(void *arg)
     char line[384];
     size_t line_len = 0U;
     (void)arg;
+    assistant_router_begin_level_session(101U);
     ESP_LOGI(TAG, "serial test ready; type: /agent <Chinese question>");
     for (;;) {
         uint8_t input[64];
@@ -37,7 +40,7 @@ static void serial_agent_task(void *arg)
             if (strncmp(line, "/agent ", 7U) != 0 || line[7] == '\0') continue;
 
             uint32_t request_id = 0U;
-            const esp_err_t submit = tuco_agent_submit(line + 7U, 101U, &request_id);
+            const esp_err_t submit = assistant_router_submit(line + 7U, 101U, &request_id);
             if (submit != ESP_OK) {
                 ESP_LOGW(TAG, "serial request rejected: %s", esp_err_to_name(submit));
                 continue;
@@ -46,14 +49,14 @@ static void serial_agent_task(void *arg)
             const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(50000);
             char reply[512];
             for (;;) {
-                const esp_err_t result = tuco_agent_take_result(request_id, reply, sizeof(reply));
+                const esp_err_t result = assistant_router_take_result(request_id, reply, sizeof(reply));
                 if (result != ESP_ERR_NOT_FOUND) {
                     ESP_LOGI(TAG, "serial reply request=%lu result=%s text=%s",
                              (unsigned long)request_id, esp_err_to_name(result), reply);
                     break;
                 }
                 if (xTaskGetTickCount() >= deadline) {
-                    tuco_agent_cancel(request_id);
+                    assistant_router_cancel(request_id);
                     ESP_LOGW(TAG, "serial request=%lu timed out", (unsigned long)request_id);
                     break;
                 }
@@ -73,7 +76,7 @@ void tuco_agent_serial_start(void)
         ESP_LOGW(TAG, "could not initialize USB Serial/JTAG input");
         return;
     }
-    if (tuco_agent_is_configured() &&
+    if ((tuco_agent_is_configured() || remote_assistant_is_configured()) &&
         xTaskCreate(serial_agent_task, "tuco_agent_cli", 4096, NULL, 3, NULL) != pdPASS) {
         ESP_LOGW(TAG, "could not create serial test task");
     }

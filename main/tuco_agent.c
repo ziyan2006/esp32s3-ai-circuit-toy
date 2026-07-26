@@ -472,6 +472,13 @@ static esp_err_t collect_tuco_history(const claw_core_request_t *request,
     return ESP_OK;
 }
 
+esp_err_t tuco_agent_build_circuit_snapshot(uint16_t level_id, char **out_json)
+{
+    board_snapshot_t snapshot;
+    if (out_json == NULL || !board_snapshot_get(&snapshot)) return ESP_ERR_INVALID_STATE;
+    return build_circuit_context(&snapshot, level_id, level_rule_get(level_id), unlocked_gate_mask(), out_json);
+}
+
 static esp_err_t collect_tuco_tools(const claw_core_request_t *request,
                                     claw_core_context_t *out_context,
                                     void *user_ctx)
@@ -996,4 +1003,33 @@ void tuco_agent_cancel(uint32_t request_id)
         memset(&s_result, 0, sizeof(s_result));
     }
     xSemaphoreGive(s_lock);
+}
+
+esp_err_t tuco_agent_execute_external_tool(uint32_t request_id, const char *name,
+                                           const char *arguments_json, char *output,
+                                           size_t output_size)
+{
+    if (s_lock == NULL || request_id == 0U || name == NULL || arguments_json == NULL ||
+        output == NULL || output_size == 0U) return ESP_ERR_INVALID_ARG;
+    claw_core_request_t request = { .request_id = request_id };
+    char *tool_output = NULL;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_active_request_id != 0U && s_active_request_id != request_id) {
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_active_request_id = request_id;
+    s_highlight_request_id = 0U;
+    xSemaphoreGive(s_lock);
+    const esp_err_t err = tuco_agent_call_cap(name, arguments_json, &request, &tool_output, NULL);
+    if (tool_output != NULL) {
+        strlcpy(output, tool_output, output_size);
+        free(tool_output);
+    } else {
+        output[0] = '\0';
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_active_request_id == request_id) s_active_request_id = 0U;
+    xSemaphoreGive(s_lock);
+    return err;
 }

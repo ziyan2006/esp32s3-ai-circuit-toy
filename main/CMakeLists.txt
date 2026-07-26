@@ -1,7 +1,7 @@
 set(SHOOTER_SRC_DIR "${CMAKE_CURRENT_LIST_DIR}/../shooter_simulator/src")
 
 idf_component_register(
-    SRCS "main.c" "key_input.c" "joystick_input.c" "app_ui.c" "campaign_content.c" "campaign_progress.c" "progress_sync.c" "assistant_mode.c" "assistant_router.c" "tuco_agent.c" "tuco_agent_serial.c" "tuco_port_highlight.c" "app_ui_font_cn_16.c" "app_ui_font_cn_24.c" "shooter_font_cn_16.c" "shooter_assets.c" "shooter_game.c" "baseboard_ir.c" "block_i2c.c" "ssd1315_oled.c" "audio_self_test.c" "play_mode.c" "board_mapping.c" "board_snapshot.c" "level_rules.c" "circuit_logic.c" "circuit_debug.c" "circuit_layout.c" "game_judge.c" "game_logic_self_test.c" "c6_network_test.c" "volcengine_voice.c"
+    SRCS "main.c" "key_input.c" "joystick_input.c" "app_ui.c" "campaign_content.c" "campaign_progress.c" "progress_sync.c" "assistant_mode.c" "assistant_router.c" "remote_assistant.c" "tuco_agent.c" "tuco_agent_serial.c" "tuco_port_highlight.c" "app_ui_font_cn_16.c" "app_ui_font_cn_24.c" "shooter_font_cn_16.c" "shooter_assets.c" "shooter_game.c" "baseboard_ir.c" "block_i2c.c" "ssd1315_oled.c" "audio_self_test.c" "play_mode.c" "board_mapping.c" "board_snapshot.c" "level_rules.c" "circuit_logic.c" "circuit_debug.c" "circuit_layout.c" "game_judge.c" "game_logic_self_test.c" "c6_network_test.c" "volcengine_voice.c"
          "${SHOOTER_SRC_DIR}/shooter_boss.c"
          "${SHOOTER_SRC_DIR}/shooter_core.c"
          "${SHOOTER_SRC_DIR}/shooter_core_self_test.c"

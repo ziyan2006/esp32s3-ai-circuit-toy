@@ -83,6 +83,19 @@ config TUCO_AGENT_SERIAL_CONSOLE
         On the USB serial console, send /agent followed by Chinese text to
         test the embedded Agent Loop without recording audio.
 
+config TUCO_REMOTE_ASSISTANT_URL
+    string "Remote assistant decision URL"
+    default ""
+    help
+        Full HTTP or HTTPS URL for the AI backend Circuit Coach decision endpoint.
+        Keep the deployment URL only in local sdkconfig; leave empty to disable
+        remote mode.
+
+config TUCO_REMOTE_ASSISTANT_TIMEOUT_MS
+    int "Remote assistant timeout (ms)"
+    range 1000 60000
+    default 20000
+
 endmenu
 
 menu "TuCo cloud voice"

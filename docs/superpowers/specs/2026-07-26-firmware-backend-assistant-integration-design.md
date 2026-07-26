@@ -23,7 +23,7 @@
 
 新增 Kconfig 配置：
 
-- `CONFIG_TUCO_REMOTE_ASSISTANT_URL`：后端决策接口的完整 HTTPS URL，本地 `sdkconfig` 覆盖，默认留空。
+- `CONFIG_TUCO_REMOTE_ASSISTANT_URL`：后端决策接口的完整 HTTP/HTTPS URL，本地 `sdkconfig` 覆盖，默认留空。
 - `CONFIG_TUCO_REMOTE_ASSISTANT_TIMEOUT_MS`：单次后端决策超时，默认 20 秒。
 
 固定目标接口为 `POST /api/device/circuit-coach/decision`。请求 JSON 为：

@@ -25,6 +25,7 @@
 #include "audio_self_test.h"
 #include "assistant_mode.h"
 #include "assistant_router.h"
+#include "remote_assistant.h"
 #include "board_snapshot.h"
 #include "board_mapping.h"
 #include "circuit_debug.h"
@@ -465,8 +466,6 @@ void app_main(void)
     circuit_debug_init();
     ESP_ERROR_CHECK(game_logic_self_test_run());
     ESP_ERROR_CHECK(assistant_mode_self_test_run());
-    ESP_ERROR_CHECK(assistant_router_init());
-    ESP_ERROR_CHECK(assistant_router_self_test_run());
     ESP_ERROR_CHECK(tuco_agent_context_self_test_run());
     ESP_ERROR_CHECK(run_shooter_self_tests());
     ESP_ERROR_CHECK(game_judge_init());
@@ -480,6 +479,9 @@ void app_main(void)
     ESP_ERROR_CHECK(app_ui_init());
     ESP_ERROR_CHECK(audio_self_test_init());
     ESP_ERROR_CHECK(tuco_agent_init());
+    ESP_ERROR_CHECK(remote_assistant_init());
+    ESP_ERROR_CHECK(assistant_router_init());
+    ESP_ERROR_CHECK(assistant_router_self_test_run());
     tuco_agent_serial_start();
     ESP_ERROR_CHECK(voice_assistant_init());
     ESP_ERROR_CHECK(block_i2c_init());

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "audio_self_test.h"
+#include "assistant_router.h"
 #include "c6_network_test.h"
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
@@ -81,7 +82,7 @@ static void status_set(voice_assistant_state_t state, bool visible, bool error, 
 static void cancel_pending_agent(void)
 {
     if (s_agent_request_id != 0U) {
-        tuco_agent_cancel(s_agent_request_id);
+        assistant_router_cancel(s_agent_request_id);
         s_agent_request_id = 0U;
     }
     s_agent_reply_ready = false;
@@ -357,7 +358,7 @@ static esp_err_t poll_agent_result(void)
     if (s_agent_request_id == 0U) return ESP_OK;
 
     char reply[sizeof(s_agent_reply)] = {0};
-    const esp_err_t result = tuco_agent_take_result(s_agent_request_id, reply, sizeof(reply));
+    const esp_err_t result = assistant_router_take_result(s_agent_request_id, reply, sizeof(reply));
     if (result == ESP_OK) {
         strlcpy(s_agent_reply, reply, sizeof(s_agent_reply));
         s_agent_request_id = 0U;
@@ -648,7 +649,7 @@ static void voice_task(void *arg)
         if (s_phase == VOICE_AGENT) {
             if (s_mode == CLOUD_ASR) clear_client();
             if (s_agent_request_id == 0U) {
-                if (tuco_agent_submit(s_final_text, s_level_id, &s_agent_request_id) != ESP_OK) {
+                if (assistant_router_submit(s_final_text, s_level_id, &s_agent_request_id) != ESP_OK) {
                     report_error("对话服务不可用");
                 } else {
                     s_agent_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(40000);
@@ -741,11 +742,11 @@ void voice_assistant_update(bool play_active, bool programmer_owns_input, bool k
     s_key_pressed = pressed; s_previous_key_pressed = key0_pressed;
     portEXIT_CRITICAL(&s_lock);
     if (play_active && (!s_session_play_active || s_session_level_id != level_id)) {
-        tuco_agent_begin_level_session(level_id);
+        assistant_router_begin_level_session(level_id);
         s_session_play_active = true;
         s_session_level_id = level_id;
     } else if (!play_active && s_session_play_active) {
-        tuco_agent_end_level_session();
+        assistant_router_end_level_session();
         s_session_play_active = false;
     }
     if (play_active && !programmer_owns_input && s_phase == VOICE_READY && configured()) {
