@@ -7,6 +7,8 @@
 
 #include "app_ui_font_cn_16.h"
 #include "app_ui_font_cn_24.h"
+#include "assistant_mode.h"
+#include "assistant_router.h"
 #include "audio_self_test.h"
 #include "board_mapping.h"
 #include "board_snapshot.h"
@@ -85,6 +87,7 @@ typedef enum {
     UI_SETTINGS_PROGRESS_SYNC,
     UI_SETTINGS_UNLOCK_ALL,
     UI_SETTINGS_INITIALIZE,
+    UI_SETTINGS_ASSISTANT_MODE,
     UI_SETTINGS_COUNT,
 } ui_settings_item_t;
 
@@ -114,6 +117,7 @@ typedef struct {
     lv_obj_t *settings_sync_status;
     lv_obj_t *settings_unlock_status;
     lv_obj_t *settings_initialize_status;
+    lv_obj_t *settings_assistant_status;
     lv_obj_t *play_circuit;
     lv_obj_t *play_code;
     lv_obj_t *play_title;
@@ -650,6 +654,14 @@ static void ui_refresh_settings_selection(void)
         lv_obj_set_style_text_color(
             s_ui.settings_initialize_status,
             lv_color_hex(s_initialize_error ? UI_COLOR_DANGER : UI_COLOR_MUTED), 0);
+    }
+    if (s_ui.settings_assistant_status != NULL) {
+        const bool remote = assistant_mode_get() == ASSISTANT_MODE_REMOTE;
+        lv_label_set_text(s_ui.settings_assistant_status,
+                          remote ? "当前使用后端助教\n按中键切换" :
+                          "当前使用内置助教\n按中键切换");
+        lv_obj_set_style_text_color(s_ui.settings_assistant_status,
+                                    lv_color_hex(remote ? UI_COLOR_GREEN : UI_COLOR_CYAN), 0);
     }
 }
 
@@ -1822,27 +1834,33 @@ static void ui_create_settings_screen(void)
 
     ui_create_label(screen, "选择功能", 282, 98, 500, UI_COLOR_CYAN);
     s_ui.settings_items[UI_SETTINGS_SPEAKER_TEST] = ui_create_action_item(
-        screen, 282, 126, 350, 190, "声音测试", "扬声器测试", "选中后按住中键播放 1 kHz",
+        screen, 282, 126, 350, 126, "声音测试", "扬声器测试", "选中后按住中键播放 1 kHz",
         ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_SPEAKER_TEST + 1U));
     s_ui.settings_items[UI_SETTINGS_PROGRESS_SYNC] = ui_create_action_item(
-        screen, 656, 126, 350, 190, "云端同步", "上传云存档", "",
+        screen, 656, 126, 350, 126, "云端同步", "上传云存档", "",
         ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_PROGRESS_SYNC + 1U));
     s_ui.settings_sync_status = ui_create_label(
-        s_ui.settings_items[UI_SETTINGS_PROGRESS_SYNC], "", 22, 140, 306, UI_COLOR_MUTED);
+        s_ui.settings_items[UI_SETTINGS_PROGRESS_SYNC], "", 22, 84, 306, UI_COLOR_MUTED);
     s_ui.settings_items[UI_SETTINGS_UNLOCK_ALL] = ui_create_action_item(
-        screen, 282, 342, 350, 190, "辅助功能", "解锁所有关卡", "",
+        screen, 282, 272, 350, 126, "辅助功能", "解锁所有关卡", "",
         ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_UNLOCK_ALL + 1U));
     s_ui.settings_unlock_status = ui_create_label(
-        s_ui.settings_items[UI_SETTINGS_UNLOCK_ALL], "", 22, 140, 306, UI_COLOR_MUTED);
+        s_ui.settings_items[UI_SETTINGS_UNLOCK_ALL], "", 22, 84, 306, UI_COLOR_MUTED);
     s_ui.settings_items[UI_SETTINGS_INITIALIZE] = ui_create_action_item(
-        screen, 656, 342, 350, 190, "游玩记录", "初始化", "",
+        screen, 656, 272, 350, 126, "游玩记录", "初始化", "",
         ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_INITIALIZE + 1U));
     s_ui.settings_initialize_status = ui_create_label(
-        s_ui.settings_items[UI_SETTINGS_INITIALIZE], "", 22, 140, 306, UI_COLOR_MUTED);
+        s_ui.settings_items[UI_SETTINGS_INITIALIZE], "", 22, 84, 306, UI_COLOR_MUTED);
+    s_ui.settings_items[UI_SETTINGS_ASSISTANT_MODE] = ui_create_action_item(
+        screen, 282, 418, 724, 142, "AI 助教", "内置 / 后端", "后端地址由本机配置",
+        ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_ASSISTANT_MODE + 1U));
+    s_ui.settings_assistant_status = ui_create_label(
+        s_ui.settings_items[UI_SETTINGS_ASSISTANT_MODE], "", 22, 84, 620, UI_COLOR_CYAN);
     ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_SPEAKER_TEST], UI_COLOR_CYAN);
     ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_PROGRESS_SYNC], UI_COLOR_GREEN);
     ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_UNLOCK_ALL], UI_COLOR_PINK);
     ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_INITIALIZE], UI_COLOR_YELLOW);
+    ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_ASSISTANT_MODE], UI_COLOR_GREEN);
     ui_refresh_settings_selection();
 }
 
@@ -2351,6 +2369,17 @@ esp_err_t app_ui_update(const key_input_state_t *keys,
                         ui_refresh_detail();
                         ESP_LOGI(TAG, "all campaign nodes unlocked for this boot");
                     }
+                } else if (s_settings_selection == UI_SETTINGS_ASSISTANT_MODE) {
+                    const assistant_mode_t next = assistant_mode_get() == ASSISTANT_MODE_LOCAL ?
+                        ASSISTANT_MODE_REMOTE : ASSISTANT_MODE_LOCAL;
+                    const esp_err_t err = assistant_mode_set(next);
+                    if (err == ESP_OK) {
+                        assistant_router_handle_mode_change();
+                        audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+                    } else {
+                        audio_self_test_play_effect(AUDIO_EFFECT_ERROR);
+                    }
+                    ui_refresh_settings_selection();
                 } else {
                     const esp_err_t err = campaign_progress_clear();
                     s_initialize_error = err != ESP_OK;
