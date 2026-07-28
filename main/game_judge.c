@@ -123,6 +123,7 @@ esp_err_t game_judge_start(const level_rule_t *rule, const board_snapshot_t *sna
         s_state.phase = GAME_JUDGE_PRECHECK_ERROR;
         s_state.level_id = rule->level_id;
         s_state.topology_revision = snapshot->topology_revision;
+        s_state.precheck_code = checked.code;
         set_message_locked(checked.message);
         s_state.version = version;
         portEXIT_CRITICAL(&s_lock);

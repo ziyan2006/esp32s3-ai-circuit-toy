@@ -1,7 +1,5 @@
 #include "c6_network_test.h"
 
-#include <arpa/inet.h>
-#include <netdb.h>
 #include <string.h>
 
 #include "esp_check.h"
@@ -11,24 +9,64 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
-static const char *TAG = "c6_network_test";
+static const char *TAG = "c6_network";
 
 #define C6_WIFI_CONNECTED BIT0
 #define C6_WIFI_FAILED    BIT1
-#define C6_WIFI_MAX_RETRY 8
-#define C6_WIFI_SCAN_MAX  20
+#define C6_CONNECT_TIMEOUT_MS 15000U
+
+typedef enum {
+    C6_COMMAND_AUTO_CONNECT = 0,
+    C6_COMMAND_SCAN,
+    C6_COMMAND_CONNECT_PRESET,
+    C6_COMMAND_CONNECT_TEMPORARY,
+} c6_command_type_t;
+
+typedef struct {
+    c6_command_type_t type;
+    uint8_t preset_index;
+    char ssid[C6_NETWORK_SSID_MAX + 1U];
+    char password[C6_NETWORK_PASSWORD_MAX + 1U];
+} c6_command_t;
+
+typedef struct {
+    const char *ssid;
+    const char *password;
+} c6_preset_t;
+
+static const c6_preset_t s_presets[] = {
+    {CONFIG_TUCO_C6_WIFI_PRESET_1_SSID, CONFIG_TUCO_C6_WIFI_PRESET_1_PASSWORD},
+    {CONFIG_TUCO_C6_WIFI_PRESET_2_SSID, CONFIG_TUCO_C6_WIFI_PRESET_2_PASSWORD},
+    {CONFIG_TUCO_C6_WIFI_PRESET_3_SSID, CONFIG_TUCO_C6_WIFI_PRESET_3_PASSWORD},
+};
 
 static EventGroupHandle_t s_wifi_events;
-static esp_netif_t *s_sta_netif;
-static uint8_t s_retry_count;
-static volatile bool s_network_connected;
+static QueueHandle_t s_command_queue;
+static c6_network_status_t s_status;
+static c6_network_scan_result_t s_scan_results[C6_NETWORK_SCAN_MAX];
+static portMUX_TYPE s_network_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool s_disconnect_requested;
 
-static bool c6_credentials_configured(void)
+static void c6_status_set(c6_network_state_t state, bool connected, bool manual, const char *ssid)
 {
-    return CONFIG_TUCO_C6_WIFI_SSID[0] != '\0';
+    portENTER_CRITICAL(&s_network_lock);
+    s_status.state = state;
+    s_status.connected = connected;
+    s_status.manual_connection = manual;
+    strlcpy(s_status.current_ssid, ssid == NULL ? "" : ssid, sizeof(s_status.current_ssid));
+    portEXIT_CRITICAL(&s_network_lock);
+}
+
+static void c6_status_mark_disconnected(void)
+{
+    portENTER_CRITICAL(&s_network_lock);
+    s_status.state = C6_NETWORK_FAILED;
+    s_status.connected = false;
+    portEXIT_CRITICAL(&s_network_lock);
 }
 
 static esp_err_t c6_init_nvs(void)
@@ -38,215 +76,242 @@ static esp_err_t c6_init_nvs(void)
         ESP_RETURN_ON_ERROR(nvs_flash_erase(), TAG, "erase NVS");
         err = nvs_flash_init();
     }
-    if (err == ESP_ERR_INVALID_STATE) {
-        return ESP_OK;
-    }
-    return err;
+    return err == ESP_ERR_INVALID_STATE ? ESP_OK : err;
 }
 
-static void c6_wifi_event_handler(void *arg,
-                                  esp_event_base_t event_base,
-                                  int32_t event_id,
-                                  void *event_data)
+static void c6_wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        ESP_LOGI(TAG, "C6 station interface started");
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        const wifi_event_sta_disconnected_t *event =
-            (const wifi_event_sta_disconnected_t *)event_data;
-        const unsigned reason = event == NULL ? 0U : (unsigned)event->reason;
-        s_network_connected = false;
-        if (s_retry_count < C6_WIFI_MAX_RETRY) {
-            ++s_retry_count;
-            ESP_LOGW(TAG, "C6 Wi-Fi disconnected (reason=%u); retry %u/%u",
-                     reason, s_retry_count, C6_WIFI_MAX_RETRY);
-            (void)esp_wifi_connect();
-        } else {
-            ESP_LOGE(TAG, "C6 Wi-Fi connection failed after %u retries; last reason=%u",
-                     C6_WIFI_MAX_RETRY, reason);
-            xEventGroupSetBits(s_wifi_events, C6_WIFI_FAILED);
+    (void)data;
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_disconnect_requested) {
+            s_disconnect_requested = false;
+            return;
         }
+        c6_status_mark_disconnected();
+        xEventGroupSetBits(s_wifi_events, C6_WIFI_FAILED);
     }
 }
 
-static void c6_ip_event_handler(void *arg,
-                                esp_event_base_t event_base,
-                                int32_t event_id,
-                                void *event_data)
+static void c6_ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
-    if (event_base != IP_EVENT || event_id != IP_EVENT_STA_GOT_IP) {
-        return;
+    (void)data;
+    if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        xEventGroupSetBits(s_wifi_events, C6_WIFI_CONNECTED);
     }
-
-    const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)event_data;
-    ESP_LOGI(TAG, "C6 Wi-Fi got IP " IPSTR " gateway " IPSTR,
-             IP2STR(&event->ip_info.ip), IP2STR(&event->ip_info.gw));
-    s_network_connected = true;
-    s_retry_count = 0;
-    xEventGroupClearBits(s_wifi_events, C6_WIFI_FAILED);
-    xEventGroupSetBits(s_wifi_events, C6_WIFI_CONNECTED);
 }
 
 static esp_err_t c6_wifi_stack_init(void)
 {
     ESP_RETURN_ON_ERROR(c6_init_nvs(), TAG, "initialize NVS");
-
     esp_err_t err = esp_netif_init();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
     err = esp_event_loop_create_default();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-
-    s_sta_netif = esp_netif_create_default_wifi_sta();
-    if (s_sta_netif == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_RETURN_ON_ERROR(esp_wifi_init(&wifi_config), TAG, "initialize remote Wi-Fi");
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
+    if (esp_netif_create_default_wifi_sta() == NULL) return ESP_ERR_NO_MEM;
+    wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_RETURN_ON_ERROR(esp_wifi_init(&config), TAG, "initialize remote Wi-Fi");
     ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "set Wi-Fi storage");
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "set station mode");
     ESP_RETURN_ON_ERROR(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                                    &c6_wifi_event_handler, NULL),
+                                                    c6_wifi_event_handler, NULL),
                         TAG, "register Wi-Fi events");
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                                    &c6_ip_event_handler, NULL),
+                                                    c6_ip_event_handler, NULL),
                         TAG, "register IP events");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "start remote Wi-Fi");
-
-    err = esp_wifi_set_ps(WIFI_PS_NONE);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "C6 Wi-Fi power save disabled for realtime voice latency");
-    } else {
-        ESP_LOGW(TAG, "C6 Wi-Fi power-save setting unavailable: %s", esp_err_to_name(err));
-    }
-
-    ESP_LOGI(TAG, "ESP-Hosted Wi-Fi stack started through the on-board ESP32-C6");
+    (void)esp_wifi_set_ps(WIFI_PS_NONE);
     return ESP_OK;
 }
 
-static esp_err_t c6_scan_and_log(void)
+static esp_err_t c6_scan(void)
 {
-    wifi_scan_config_t scan_config = {0};
-    ESP_RETURN_ON_ERROR(esp_wifi_scan_start(&scan_config, true), TAG, "scan Wi-Fi networks");
-
-    uint16_t ap_count = 0;
-    ESP_RETURN_ON_ERROR(esp_wifi_scan_get_ap_num(&ap_count), TAG, "get AP count");
-    if (ap_count > C6_WIFI_SCAN_MAX) {
-        ap_count = C6_WIFI_SCAN_MAX;
+    wifi_scan_config_t config = {0};
+    ESP_RETURN_ON_ERROR(esp_wifi_scan_start(&config, true), TAG, "scan Wi-Fi networks");
+    uint16_t count = 0U;
+    ESP_RETURN_ON_ERROR(esp_wifi_scan_get_ap_num(&count), TAG, "get AP count");
+    if (count > C6_NETWORK_SCAN_MAX) count = C6_NETWORK_SCAN_MAX;
+    wifi_ap_record_t records[C6_NETWORK_SCAN_MAX] = {0};
+    uint16_t fetched = count;
+    ESP_RETURN_ON_ERROR(esp_wifi_scan_get_ap_records(&fetched, records), TAG, "get AP records");
+    portENTER_CRITICAL(&s_network_lock);
+    s_status.scan_count = (uint8_t)fetched;
+    for (uint16_t index = 0U; index < fetched; ++index) {
+        memcpy(s_scan_results[index].ssid, records[index].ssid, sizeof(records[index].ssid));
+        s_scan_results[index].ssid[C6_NETWORK_SSID_MAX] = '\0';
+        s_scan_results[index].rssi = records[index].rssi;
+        s_scan_results[index].requires_password = records[index].authmode != WIFI_AUTH_OPEN;
     }
-
-    wifi_ap_record_t records[C6_WIFI_SCAN_MAX] = {0};
-    uint16_t record_count = ap_count;
-    if (record_count > 0) {
-        ESP_RETURN_ON_ERROR(esp_wifi_scan_get_ap_records(&record_count, records), TAG,
-                            "get AP records");
-    }
-    ESP_LOGI(TAG, "C6 Wi-Fi scan complete: %u access point(s)", record_count);
-    for (uint16_t index = 0; index < record_count; ++index) {
-        char ssid[sizeof(records[index].ssid) + 1] = {0};
-        memcpy(ssid, records[index].ssid, sizeof(records[index].ssid));
-        ESP_LOGI(TAG, "  AP[%u] SSID=\"%s\" RSSI=%d channel=%u auth=%u",
-                 index, ssid, records[index].rssi, records[index].primary,
-                 records[index].authmode);
-    }
+    portEXIT_CRITICAL(&s_network_lock);
     return ESP_OK;
 }
 
-static void c6_dns_probe(void)
+static esp_err_t c6_connect(const char *ssid, const char *password, bool manual)
 {
-    struct addrinfo hints = {
-        .ai_family = AF_INET,
-        .ai_socktype = SOCK_STREAM,
-    };
-    struct addrinfo *result = NULL;
-    const int err = getaddrinfo("example.com", "80", &hints, &result);
-    if (err != 0 || result == NULL) {
-        ESP_LOGE(TAG, "C6 DNS probe failed: err=%d", err);
-        return;
+    if (ssid == NULL || ssid[0] == '\0') return ESP_ERR_INVALID_ARG;
+    c6_status_set(C6_NETWORK_CONNECTING, false, manual, ssid);
+    wifi_config_t config = {0};
+    strlcpy((char *)config.sta.ssid, ssid, sizeof(config.sta.ssid));
+    strlcpy((char *)config.sta.password, password == NULL ? "" : password, sizeof(config.sta.password));
+    s_disconnect_requested = true;
+    if (esp_wifi_disconnect() != ESP_OK) s_disconnect_requested = false;
+    xEventGroupClearBits(s_wifi_events, C6_WIFI_CONNECTED | C6_WIFI_FAILED);
+    ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &config), TAG, "set station config");
+    ESP_RETURN_ON_ERROR(esp_wifi_connect(), TAG, "connect station");
+    const EventBits_t bits = xEventGroupWaitBits(s_wifi_events, C6_WIFI_CONNECTED | C6_WIFI_FAILED,
+                                                  pdTRUE, pdFALSE, pdMS_TO_TICKS(C6_CONNECT_TIMEOUT_MS));
+    if ((bits & C6_WIFI_CONNECTED) == 0U) {
+        c6_status_set(C6_NETWORK_FAILED, false, manual, ssid);
+        return ESP_FAIL;
     }
-
-    char address[INET_ADDRSTRLEN] = {0};
-    const struct sockaddr_in *ipv4 = (const struct sockaddr_in *)result->ai_addr;
-    inet_ntop(AF_INET, &ipv4->sin_addr, address, sizeof(address));
-    ESP_LOGI(TAG, "C6 DNS probe succeeded: example.com -> %s", address);
-    freeaddrinfo(result);
+    c6_status_set(C6_NETWORK_CONNECTED, true, manual, ssid);
+    ESP_LOGI(TAG, "Wi-Fi connected");
+    return ESP_OK;
 }
 
-static void c6_network_test_task(void *arg)
+static esp_err_t c6_auto_connect(void)
 {
-    (void)arg;
-    esp_err_t err = c6_wifi_stack_init();
+    c6_status_set(C6_NETWORK_SCANNING, false, false, "");
+    esp_err_t err = c6_scan();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "C6/ESP-Hosted initialization failed: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
-        return;
+        c6_status_set(C6_NETWORK_FAILED, false, false, "");
+        return err;
     }
-
-    err = c6_scan_and_log();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "C6 Wi-Fi scan failed: %s", esp_err_to_name(err));
-        ESP_LOGW(TAG, "Continuing with station connection despite scan failure");
-    }
-
-    if (!c6_credentials_configured()) {
-        ESP_LOGI(TAG, "Scan-only mode: set TUCO_C6_WIFI_SSID/PASSWORD for Internet test");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    wifi_config_t station_config = {0};
-    strlcpy((char *)station_config.sta.ssid, CONFIG_TUCO_C6_WIFI_SSID,
-            sizeof(station_config.sta.ssid));
-    strlcpy((char *)station_config.sta.password, CONFIG_TUCO_C6_WIFI_PASSWORD,
-            sizeof(station_config.sta.password));
-    ESP_LOGI(TAG, "Connecting C6 to configured SSID \"%s\"", CONFIG_TUCO_C6_WIFI_SSID);
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &station_config));
-    s_retry_count = 0;
-    ESP_ERROR_CHECK(esp_wifi_connect());
-
-    const EventBits_t bits = xEventGroupWaitBits(s_wifi_events,
-                                                  C6_WIFI_CONNECTED | C6_WIFI_FAILED,
-                                                  pdFALSE, pdFALSE, pdMS_TO_TICKS(20000));
-    if ((bits & C6_WIFI_CONNECTED) != 0) {
-        c6_dns_probe();
-    } else {
-        ESP_LOGE(TAG, "C6 Internet test timed out before receiving an IP address");
-    }
-
-    /* Keep a small service loop alive so powering the hotspot later does not
-     * require rebooting the toy. Event callbacks still handle short outages. */
-    for (;;) {
-        if (!s_network_connected) {
-            s_retry_count = 0;
-            xEventGroupClearBits(s_wifi_events, C6_WIFI_FAILED | C6_WIFI_CONNECTED);
-            const esp_err_t reconnect_err = esp_wifi_connect();
-            if (reconnect_err != ESP_OK) {
-                ESP_LOGW(TAG, "C6 background reconnect failed to start: %s",
-                         esp_err_to_name(reconnect_err));
+    c6_network_scan_result_t scan_results[C6_NETWORK_SCAN_MAX];
+    const uint8_t scan_count = c6_network_get_scan_results(scan_results, C6_NETWORK_SCAN_MAX);
+    int8_t order[3] = {-1, -1, -1};
+    int8_t rssi[3] = {-127, -127, -127};
+    for (uint8_t result = 0U; result < scan_count; ++result) {
+        for (uint8_t preset = 0U; preset < 3U; ++preset) {
+            if (s_presets[preset].ssid[0] != '\0' &&
+                strcmp(s_presets[preset].ssid, scan_results[result].ssid) == 0) {
+                rssi[preset] = scan_results[result].rssi;
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+    for (uint8_t attempt = 0U; attempt < 3U; ++attempt) {
+        int8_t best = -1;
+        for (uint8_t preset = 0U; preset < 3U; ++preset) {
+            if (rssi[preset] > -127 && (best < 0 || rssi[preset] > rssi[(uint8_t)best])) best = (int8_t)preset;
+        }
+        if (best < 0) break;
+        order[attempt] = best;
+        rssi[(uint8_t)best] = -127;
+    }
+    for (uint8_t attempt = 0U; attempt < 3U && order[attempt] >= 0; ++attempt) {
+        const c6_preset_t *preset = &s_presets[(uint8_t)order[attempt]];
+        if (c6_connect(preset->ssid, preset->password, false) == ESP_OK) return ESP_OK;
+    }
+    c6_status_set(C6_NETWORK_FAILED, false, false, "");
+    return ESP_FAIL;
+}
+
+static void c6_network_task(void *arg)
+{
+    (void)arg;
+    if (c6_wifi_stack_init() != ESP_OK) {
+        c6_status_set(C6_NETWORK_FAILED, false, false, "");
+        vTaskDelete(NULL);
+        return;
+    }
+    c6_command_t command = {.type = C6_COMMAND_AUTO_CONNECT};
+    for (;;) {
+        if (xQueueReceive(s_command_queue, &command, pdMS_TO_TICKS(5000)) != pdPASS) {
+            c6_network_status_t status;
+            c6_network_get_status(&status);
+            if (!status.connected && !status.manual_connection) command.type = C6_COMMAND_AUTO_CONNECT;
+            else continue;
+        }
+        if (command.type == C6_COMMAND_SCAN) {
+            c6_network_status_t previous;
+            c6_network_get_status(&previous);
+            c6_status_set(C6_NETWORK_SCANNING, previous.connected,
+                          previous.manual_connection, previous.current_ssid);
+            (void)c6_scan();
+            c6_status_set(previous.connected ? C6_NETWORK_CONNECTED : C6_NETWORK_IDLE,
+                          previous.connected, previous.manual_connection, previous.current_ssid);
+        } else if (command.type == C6_COMMAND_CONNECT_TEMPORARY) {
+            (void)c6_connect(command.ssid, command.password, true);
+        } else if (command.type == C6_COMMAND_CONNECT_PRESET && command.preset_index < 3U) {
+            (void)c6_connect(s_presets[command.preset_index].ssid,
+                             s_presets[command.preset_index].password, false);
+        } else if (command.type == C6_COMMAND_AUTO_CONNECT) {
+            (void)c6_auto_connect();
+        }
     }
 }
 
 esp_err_t c6_network_test_start(void)
 {
-    s_network_connected = false;
     s_wifi_events = xEventGroupCreate();
-    if (s_wifi_events == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-    return xTaskCreate(c6_network_test_task, "c6_wifi_test", 6144, NULL, 4, NULL) == pdPASS ?
-           ESP_OK : ESP_ERR_NO_MEM;
+    s_command_queue = xQueueCreate(4U, sizeof(c6_command_t));
+    if (s_wifi_events == NULL || s_command_queue == NULL) return ESP_ERR_NO_MEM;
+    memset(&s_status, 0, sizeof(s_status));
+    return xTaskCreate(c6_network_task, "c6_wifi", 6144, NULL, 4, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 bool c6_network_is_connected(void)
 {
-    return s_network_connected;
+    c6_network_status_t status;
+    c6_network_get_status(&status);
+    return status.connected;
+}
+
+void c6_network_get_status(c6_network_status_t *status)
+{
+    if (status == NULL) return;
+    portENTER_CRITICAL(&s_network_lock);
+    *status = s_status;
+    portEXIT_CRITICAL(&s_network_lock);
+}
+
+uint8_t c6_network_get_scan_results(c6_network_scan_result_t *results, uint8_t capacity)
+{
+    portENTER_CRITICAL(&s_network_lock);
+    const uint8_t count = s_status.scan_count < capacity ? s_status.scan_count : capacity;
+    if (results != NULL && count > 0U) memcpy(results, s_scan_results, count * sizeof(*results));
+    portEXIT_CRITICAL(&s_network_lock);
+    return count;
+}
+
+const char *c6_network_get_preset_ssid(uint8_t preset_index)
+{
+    return preset_index < 3U ? s_presets[preset_index].ssid : "";
+}
+
+static esp_err_t c6_submit(const c6_command_t *command)
+{
+    if (s_command_queue == NULL) return ESP_ERR_INVALID_STATE;
+    return xQueueSend(s_command_queue, command, 0) == pdPASS ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t c6_network_request_scan(void)
+{
+    const c6_command_t command = {.type = C6_COMMAND_SCAN};
+    c6_network_status_t previous;
+    c6_network_get_status(&previous);
+    c6_status_set(C6_NETWORK_SCANNING, previous.connected,
+                  previous.manual_connection, previous.current_ssid);
+    const esp_err_t err = c6_submit(&command);
+    if (err != ESP_OK) c6_status_set(previous.state, previous.connected,
+                                     previous.manual_connection, previous.current_ssid);
+    return err;
+}
+
+esp_err_t c6_network_connect_scan_result(uint8_t index, const char *password)
+{
+    c6_network_scan_result_t results[C6_NETWORK_SCAN_MAX];
+    const uint8_t count = c6_network_get_scan_results(results, C6_NETWORK_SCAN_MAX);
+    if (index >= count) return ESP_ERR_INVALID_ARG;
+    c6_command_t command = {.type = C6_COMMAND_CONNECT_TEMPORARY};
+    strlcpy(command.ssid, results[index].ssid, sizeof(command.ssid));
+    strlcpy(command.password, password == NULL ? "" : password, sizeof(command.password));
+    return c6_submit(&command);
+}
+
+esp_err_t c6_network_connect_preset(uint8_t preset_index)
+{
+    const c6_command_t command = {.type = C6_COMMAND_CONNECT_PRESET, .preset_index = preset_index};
+    return preset_index < 3U ? c6_submit(&command) : ESP_ERR_INVALID_ARG;
 }

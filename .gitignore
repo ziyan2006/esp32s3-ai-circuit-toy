@@ -19,6 +19,13 @@ __pycache__/
 /scratch/*.err
 /scratch/*.wav
 
+# Local backups and serial captures
+/logs/
+/test_backups/
+/version_backups/
+/no
+/忽略/
+
 # Editor and operating-system files
 .vscode/
 .idea/

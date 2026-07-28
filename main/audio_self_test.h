@@ -10,6 +10,8 @@
 esp_err_t audio_self_test_init(void);
 void audio_self_test_set_tone_enabled(bool enabled);
 void audio_self_test_get_microphone_level(float *out_rms, float *out_tone_ratio);
+void audio_self_test_set_master_volume(uint8_t volume_percent);
+uint8_t audio_self_test_get_master_volume(void);
 
 /* Cloud voice uses the existing microphone reader and speaker writer, so the codec
  * is never accessed concurrently from a second task. */

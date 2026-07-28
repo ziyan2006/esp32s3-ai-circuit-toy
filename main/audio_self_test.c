@@ -58,6 +58,7 @@ static volatile bool s_voice_playback_active;
 static volatile bool s_voice_playback_finishing;
 static volatile bool s_voice_playback_ready;
 static volatile bool s_voice_playback_started;
+static volatile uint8_t s_master_volume = AUDIO_EFFECT_OUTPUT_VOLUME;
 static size_t s_voice_playback_queued_bytes;
 static uint8_t s_voice_playback_push_block[AUDIO_VOICE_PLAY_WRITE_BLOCK_BYTES];
 static size_t s_voice_playback_push_fill;
@@ -68,6 +69,22 @@ static int64_t s_voice_first_write_started_us;
 static int64_t s_voice_last_write_finished_us;
 static int64_t s_voice_last_successful_write_us;
 static BaseType_t s_speaker_task_affinity = tskNO_AFFINITY;
+
+static uint8_t audio_effect_output_volume(void)
+{
+    return s_master_volume;
+}
+
+static uint8_t audio_voice_output_volume(void)
+{
+    if (s_master_volume == 0U) {
+        return 0U;
+    }
+    const uint32_t scaled = ((uint32_t)s_master_volume * AUDIO_VOICE_OUTPUT_VOLUME +
+                             (AUDIO_EFFECT_OUTPUT_VOLUME / 2U)) /
+                            AUDIO_EFFECT_OUTPUT_VOLUME;
+    return (uint8_t)(scaled > AUDIO_VOICE_OUTPUT_VOLUME ? AUDIO_VOICE_OUTPUT_VOLUME : scaled);
+}
 
 typedef struct {
     uint16_t duration_ms;
@@ -417,7 +434,7 @@ static void speaker_task(void *arg)
 {
     audio_effect_t requested;
     audio_effect_player_t effect_player = {0};
-    bool voice_volume_active = false;
+    int output_volume = -1;
 
     (void)arg;
     s_speaker_task_affinity = xTaskGetCoreID(NULL);
@@ -428,12 +445,13 @@ static void speaker_task(void *arg)
 
     for (;;) {
         const bool use_voice_volume = s_voice_playback_active;
-        if (use_voice_volume != voice_volume_active) {
+        const uint8_t requested_volume = use_voice_volume ?
+            audio_voice_output_volume() : audio_effect_output_volume();
+        if (output_volume != requested_volume) {
             log_optional_codec_control(
                 use_voice_volume ? "speaker voice volume" : "speaker effect volume",
-                esp_codec_dev_set_out_vol(s_speaker,
-                    use_voice_volume ? AUDIO_VOICE_OUTPUT_VOLUME : AUDIO_EFFECT_OUTPUT_VOLUME));
-            voice_volume_active = use_voice_volume;
+                esp_codec_dev_set_out_vol(s_speaker, requested_volume));
+            output_volume = requested_volume;
         }
         if (xQueueReceive(s_effect_queue, &requested, 0) == pdPASS) {
             effect_player_start(&effect_player, requested);
@@ -599,7 +617,7 @@ esp_err_t audio_self_test_init(void)
     }
     log_optional_codec_control("speaker effect volume",
                                esp_codec_dev_set_out_vol(s_speaker,
-                                                       AUDIO_EFFECT_OUTPUT_VOLUME));
+                                                       audio_effect_output_volume()));
     log_optional_codec_control("speaker unmute", esp_codec_dev_set_out_mute(s_speaker, false));
     log_optional_codec_control("microphone gain", esp_codec_dev_set_in_gain(s_microphone, AUDIO_INPUT_GAIN_DB));
     if (xTaskCreate(speaker_task, "audio_tone", 3072, NULL,
@@ -620,6 +638,16 @@ esp_err_t audio_self_test_init(void)
 void audio_self_test_set_tone_enabled(bool enabled)
 {
     s_tone_enabled = enabled;
+}
+
+void audio_self_test_set_master_volume(uint8_t volume_percent)
+{
+    s_master_volume = volume_percent > 100U ? 100U : volume_percent;
+}
+
+uint8_t audio_self_test_get_master_volume(void)
+{
+    return s_master_volume;
 }
 
 void audio_self_test_play_effect(audio_effect_t effect)
