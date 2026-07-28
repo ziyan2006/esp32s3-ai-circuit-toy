@@ -322,6 +322,11 @@ static void ui_record_node_completion(uint16_t index);
 
 static void ui_set_font(lv_obj_t *object)
 {
+    lv_obj_set_style_text_font(object, &app_ui_font_cn_24, 0);
+}
+
+static void ui_set_compact_font(lv_obj_t *object)
+{
     lv_obj_set_style_text_font(object, &app_ui_font_cn_16, 0);
 }
 
@@ -569,7 +574,7 @@ static void ui_create_header(lv_obj_t *screen, const char *section, const char *
     }
 
     lv_obj_t *section_label = ui_create_label(header, section, title_x, 9, 420, UI_COLOR_CYAN);
-    lv_obj_set_style_text_font(section_label, &app_ui_font_cn_16, 0);
+    ui_set_compact_font(section_label);
     lv_obj_t *title_label = ui_create_label(header, title, title_x, 28, 520, UI_COLOR_TEXT);
     lv_obj_set_style_text_font(title_label, &app_ui_font_cn_24, 0);
 
@@ -592,6 +597,7 @@ static void ui_create_header(lv_obj_t *screen, const char *section, const char *
     lv_obj_set_style_border_width(status_dot, 0, 0);
     lv_obj_set_style_radius(status_dot, LV_RADIUS_CIRCLE, 0);
     lv_obj_t *status = ui_create_label(status_pill, "准备好了", 32, 7, 120, UI_COLOR_GREEN);
+    ui_set_compact_font(status);
     lv_obj_set_height(status, 22);
     lv_label_set_long_mode(status, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(status, LV_TEXT_ALIGN_CENTER, 0);
@@ -666,7 +672,8 @@ static lv_obj_t *ui_create_settings_item(lv_obj_t *parent,
         lv_obj_add_event_cb(item, callback, LV_EVENT_CLICKED, user_data);
     }
 
-    ui_create_label(item, section, 22, 14, width - 84, UI_COLOR_AMBER);
+    lv_obj_t *section_label = ui_create_label(item, section, 22, 14, width - 84, UI_COLOR_AMBER);
+    ui_set_compact_font(section_label);
     lv_obj_t *title_label = ui_create_label(item, title, 22, 38, width - 86, UI_COLOR_TEXT);
     lv_obj_set_style_text_font(title_label, &app_ui_font_cn_24, 0);
     lv_label_set_long_mode(title_label, LV_LABEL_LONG_CLIP);
@@ -1379,6 +1386,7 @@ static void ui_create_campaign_screen(void)
                             (void *)(uintptr_t)(index + 1U));
 
         s_ui.map_node_ids[index] = ui_create_label(node, "", 10, 7, UI_NODE_WIDTH - 20, UI_COLOR_CYAN);
+        ui_set_compact_font(s_ui.map_node_ids[index]);
         if (nodes[index].kind == CAMPAIGN_NODE_KIND_REWARD) {
             lv_label_set_text(s_ui.map_node_ids[index], "特别关卡");
             ui_add_pixel_corners(node, UI_COLOR_PINK);
@@ -1389,6 +1397,8 @@ static void ui_create_campaign_screen(void)
             node, nodes[index].title, 10, 33, UI_NODE_WIDTH - 20, UI_COLOR_TEXT);
         if (nodes[index].kind == CAMPAIGN_NODE_KIND_REWARD) {
             lv_obj_set_style_text_font(s_ui.map_node_titles[index], &shooter_font_cn_16, 0);
+        } else {
+            ui_set_compact_font(s_ui.map_node_titles[index]);
         }
         lv_obj_set_style_text_align(s_ui.map_node_titles[index], LV_TEXT_ALIGN_CENTER, 0);
     }
@@ -1403,8 +1413,10 @@ static void ui_create_campaign_screen(void)
     lv_obj_set_height(s_ui.campaign_goal, 226);
     ui_create_accent(side, 18, 356, 212, UI_COLOR_CYAN_DIM);
     s_ui.campaign_gate_reward = ui_create_label(side, "", 18, 372, 212, UI_COLOR_CYAN);
+    ui_set_compact_font(s_ui.campaign_gate_reward);
     lv_obj_set_height(s_ui.campaign_gate_reward, 24);
     s_ui.campaign_ship_reward = ui_create_label(side, "", 18, 400, 212, UI_COLOR_PINK);
+    ui_set_compact_font(s_ui.campaign_ship_reward);
     lv_obj_set_height(s_ui.campaign_ship_reward, 24);
 
     lv_obj_t *open = lv_button_create(side);
@@ -1437,7 +1449,7 @@ static void ui_refresh_detail(void)
     lv_label_set_text(s_ui.detail_gate_reward, node->gate_reward);
     lv_label_set_text(s_ui.detail_ship_reward, node->ship_reward);
     const lv_font_t *detail_font = node->kind == CAMPAIGN_NODE_KIND_REWARD ?
-        &shooter_font_cn_16 : &app_ui_font_cn_16;
+        &shooter_font_cn_16 : &app_ui_font_cn_24;
     lv_obj_set_style_text_font(s_ui.detail_title,
                                node->kind == CAMPAIGN_NODE_KIND_REWARD ?
                                    &shooter_font_cn_16 : &app_ui_font_cn_24, 0);
@@ -1857,7 +1869,7 @@ static void ui_circuit_draw_event_cb(lv_event_t *event)
 
     if (s_play_layout.node_count == 0U) {
         const lv_area_t empty = {area.x1 + 100, area.y1 + 205, area.x2 - 100, area.y1 + 250};
-        ui_draw_text(layer, "把积木放到底板上吧", &app_ui_font_cn_16,
+        ui_draw_text(layer, "把积木放到底板上吧", &app_ui_font_cn_24,
                      UI_COLOR_MUTED, &empty, LV_TEXT_ALIGN_CENTER);
     }
 }
@@ -2204,6 +2216,7 @@ static void ui_create_play_screen(void)
     ui_add_pixel_corners(side, UI_COLOR_YELLOW);
     ui_create_accent(side, 0, 0, 124, UI_COLOR_CYAN);
     s_ui.play_code = ui_create_label(side, "", 20, 16, 272, UI_COLOR_AMBER);
+    ui_set_compact_font(s_ui.play_code);
     s_ui.play_title = ui_create_label(side, "", 20, 43, 272, UI_COLOR_TEXT);
     lv_obj_set_style_text_font(s_ui.play_title, &app_ui_font_cn_24, 0);
     s_ui.play_goal = ui_create_label(side, "", 20, 78, 272, UI_COLOR_MUTED);
@@ -2219,10 +2232,10 @@ static void ui_create_play_screen(void)
     lv_obj_clear_flag(s_ui.play_truth, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_ui.play_truth, ui_truth_draw_event_cb, LV_EVENT_DRAW_MAIN, NULL);
     s_ui.play_status = ui_create_label(side, "", 20, 358, 272, UI_COLOR_MUTED);
-    lv_obj_set_height(s_ui.play_status, 42);
+    lv_obj_set_height(s_ui.play_status, 50);
 
     s_ui.play_action = lv_button_create(side);
-    lv_obj_set_pos(s_ui.play_action, 20, 404);
+    lv_obj_set_pos(s_ui.play_action, 20, 414);
     lv_obj_set_size(s_ui.play_action, 272, 36);
     ui_style_action_item(s_ui.play_action, true, true);
     lv_obj_add_event_cb(s_ui.play_action, ui_start_judge_event_cb, LV_EVENT_CLICKED, NULL);
@@ -2233,7 +2246,7 @@ static void ui_create_play_screen(void)
     lv_obj_center(s_ui.play_action_label);
 
     s_ui.play_debug_action = lv_button_create(side);
-    lv_obj_set_pos(s_ui.play_debug_action, 20, 448);
+    lv_obj_set_pos(s_ui.play_debug_action, 20, 454);
     lv_obj_set_size(s_ui.play_debug_action, 272, 36);
     ui_style_action_item(s_ui.play_debug_action, false, true);
     lv_obj_add_event_cb(s_ui.play_debug_action, ui_toggle_debug_event_cb, LV_EVENT_CLICKED, NULL);
@@ -2300,31 +2313,31 @@ static void ui_create_settings_screen(void)
         ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_VOLUME + 1U));
     lv_obj_t *volume_status = ui_create_label(
         s_ui.settings_items[UI_SETTINGS_VOLUME], "调节本次开机音量", 22, 90, 306, UI_COLOR_MUTED);
-    lv_obj_set_height(volume_status, 24);
+    lv_obj_set_height(volume_status, 32);
     s_ui.settings_items[UI_SETTINGS_WIFI] = ui_create_settings_item(
         screen, 656, 122, 350, 126, "网络连接", "Wi-Fi 选择",
         ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_WIFI + 1U));
     lv_obj_t *wifi_status = ui_create_label(
         s_ui.settings_items[UI_SETTINGS_WIFI], "预设热点与连接状态", 22, 90, 306, UI_COLOR_MUTED);
-    lv_obj_set_height(wifi_status, 24);
+    lv_obj_set_height(wifi_status, 32);
     s_ui.settings_items[UI_SETTINGS_PROGRESS_SYNC] = ui_create_settings_item(
         screen, 282, 264, 350, 126, "云端同步", "上传云存档",
         ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_PROGRESS_SYNC + 1U));
     s_ui.settings_sync_status = ui_create_label(
         s_ui.settings_items[UI_SETTINGS_PROGRESS_SYNC], "", 22, 90, 306, UI_COLOR_MUTED);
-    lv_obj_set_height(s_ui.settings_sync_status, 24);
+    lv_obj_set_height(s_ui.settings_sync_status, 32);
     s_ui.settings_items[UI_SETTINGS_ASSISTANT_MODE] = ui_create_settings_item(
         screen, 656, 264, 350, 126, "AI 助教", "内置 / 后端",
         ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_ASSISTANT_MODE + 1U));
     s_ui.settings_assistant_status = ui_create_label(
         s_ui.settings_items[UI_SETTINGS_ASSISTANT_MODE], "", 22, 90, 306, UI_COLOR_CYAN);
-    lv_obj_set_height(s_ui.settings_assistant_status, 24);
+    lv_obj_set_height(s_ui.settings_assistant_status, 32);
     s_ui.settings_items[UI_SETTINGS_DEBUG] = ui_create_settings_item(
         screen, 282, 406, 724, 162, "开发工具", "调试设置",
         ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_DEBUG + 1U));
     lv_obj_t *debug_status = ui_create_label(
         s_ui.settings_items[UI_SETTINGS_DEBUG], "扬声器测试 / 解锁所有关卡 / 初始化", 22, 90, 640, UI_COLOR_MUTED);
-    lv_obj_set_height(debug_status, 24);
+    lv_obj_set_height(debug_status, 32);
     ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_VOLUME], UI_COLOR_CYAN);
     ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_WIFI], UI_COLOR_GREEN);
     ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_PROGRESS_SYNC], UI_COLOR_GREEN);
@@ -2418,7 +2431,7 @@ static void ui_create_settings_wifi_screen(void)
         lv_obj_set_height(s_ui.settings_wifi_titles[row], 30);
         s_ui.settings_wifi_details[row] = ui_create_label(s_ui.settings_wifi_items[row], "",
                                                           22, 78, 640, UI_COLOR_MUTED);
-        lv_obj_set_height(s_ui.settings_wifi_details[row], 18);
+        lv_obj_set_height(s_ui.settings_wifi_details[row], 32);
         ui_add_pixel_corners(s_ui.settings_wifi_items[row], UI_COLOR_GREEN);
     }
     ui_refresh_wifi_selection();
@@ -2485,6 +2498,7 @@ static void ui_create_settings_wifi_password_screen(void)
                         LV_EVENT_CLICKED, NULL);
     s_ui.settings_password_mode_label = lv_label_create(s_ui.settings_password_mode);
     lv_label_set_text(s_ui.settings_password_mode_label, "abc");
+    lv_obj_set_style_text_font(s_ui.settings_password_mode_label, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(s_ui.settings_password_mode_label, lv_color_hex(UI_COLOR_TEXT), 0);
     lv_obj_center(s_ui.settings_password_mode_label);
 
@@ -2498,6 +2512,7 @@ static void ui_create_settings_wifi_password_screen(void)
         lv_obj_add_event_cb(key, ui_wifi_password_key_event_cb, LV_EVENT_CLICKED,
                             (void *)(uintptr_t)index);
         s_ui.settings_password_key_labels[index] = lv_label_create(key);
+        lv_obj_set_style_text_font(s_ui.settings_password_key_labels[index], &lv_font_montserrat_22, 0);
         lv_obj_set_style_text_color(s_ui.settings_password_key_labels[index],
                                     lv_color_hex(UI_COLOR_TEXT), 0);
         lv_obj_center(s_ui.settings_password_key_labels[index]);
@@ -2547,15 +2562,15 @@ static void ui_create_settings_debug_screen(void)
         if (index == UI_DEBUG_SPEAKER_TEST) {
             lv_obj_t *status = ui_create_label(s_ui.settings_debug_items[index],
                                                "按住中键播放 1 kHz", 22, 90, 640, UI_COLOR_MUTED);
-            lv_obj_set_height(status, 24);
+            lv_obj_set_height(status, 32);
         } else if (index == UI_DEBUG_UNLOCK_ALL) {
             s_ui.settings_unlock_status = ui_create_label(s_ui.settings_debug_items[index], "",
                                                           22, 90, 640, UI_COLOR_MUTED);
-            lv_obj_set_height(s_ui.settings_unlock_status, 24);
+            lv_obj_set_height(s_ui.settings_unlock_status, 32);
         } else {
             s_ui.settings_initialize_status = ui_create_label(s_ui.settings_debug_items[index], "",
                                                               22, 90, 640, UI_COLOR_MUTED);
-            lv_obj_set_height(s_ui.settings_initialize_status, 24);
+            lv_obj_set_height(s_ui.settings_initialize_status, 32);
         }
         ui_add_pixel_corners(s_ui.settings_debug_items[index], colors[index]);
     }
