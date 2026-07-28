@@ -10,6 +10,8 @@
 #include "lvgl.h"
 #endif
 
+#include "app_ui_font_cn_16.h"
+
 #ifndef APP_UI_FONT_CN_24
 #define APP_UI_FONT_CN_24 1
 #endif
@@ -27034,7 +27036,7 @@ lv_font_t app_ui_font_cn_24 = {
 #endif
     .dsc = &font_dsc,          /*The custom font data. Will be accessed by `get_glyph_bitmap/dsc` */
 #if LV_VERSION_CHECK(8, 2, 0) || LVGL_VERSION_MAJOR >= 9
-    .fallback = NULL,
+    .fallback = &app_ui_font_cn_16,
 #endif
     .user_data = NULL,
 };
@@ -27042,4 +27044,3 @@ lv_font_t app_ui_font_cn_24 = {
 
 
 #endif /*#if APP_UI_FONT_CN_24*/
-
