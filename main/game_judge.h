@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "board_snapshot.h"
+#include "circuit_logic.h"
 #include "esp_err.h"
 #include "level_rules.h"
 
@@ -35,6 +36,7 @@ typedef struct {
     uint8_t completed_rows;
     uint8_t active_row;
     bool active_row_valid;
+    circuit_check_code_t precheck_code;
     game_judge_row_t rows[LEVEL_RULE_MAX_CASES];
     char message[64];
 } game_judge_state_t;

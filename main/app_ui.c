@@ -14,6 +14,7 @@
 #include "board_snapshot.h"
 #include "circuit_debug.h"
 #include "circuit_layout.h"
+#include "c6_network_test.h"
 #include "game_judge.h"
 #include "level_rules.h"
 #include "play_mode.h"
@@ -71,6 +72,10 @@ typedef enum {
     UI_PAGE_PLAY,
     UI_PAGE_SUCCESS,
     UI_PAGE_SETTINGS,
+    UI_PAGE_SETTINGS_VOLUME,
+    UI_PAGE_SETTINGS_WIFI,
+    UI_PAGE_SETTINGS_WIFI_PASSWORD,
+    UI_PAGE_SETTINGS_DEBUG,
     UI_PAGE_DIAGNOSTICS,
     UI_PAGE_SHOOTER,
     UI_PAGE_COUNT,
@@ -83,18 +88,36 @@ typedef enum {
 } ui_home_item_t;
 
 typedef enum {
-    UI_SETTINGS_SPEAKER_TEST = 0,
+    UI_SETTINGS_VOLUME = 0,
+    UI_SETTINGS_WIFI,
     UI_SETTINGS_PROGRESS_SYNC,
-    UI_SETTINGS_UNLOCK_ALL,
-    UI_SETTINGS_INITIALIZE,
     UI_SETTINGS_ASSISTANT_MODE,
+    UI_SETTINGS_DEBUG,
     UI_SETTINGS_COUNT,
 } ui_settings_item_t;
+
+typedef enum {
+    UI_DEBUG_SPEAKER_TEST = 0,
+    UI_DEBUG_UNLOCK_ALL,
+    UI_DEBUG_INITIALIZE,
+    UI_DEBUG_SETTINGS_COUNT,
+} ui_debug_settings_item_t;
+
+#define UI_WIFI_PRESET_COUNT 3U
+#define UI_WIFI_VISIBLE_ROWS 4U
+#define UI_WIFI_KEY_COUNT 40U
+#define UI_WIFI_PASSWORD_MODE_CONTROL UI_WIFI_KEY_COUNT
+#define UI_WIFI_PASSWORD_DELETE_CONTROL (UI_WIFI_KEY_COUNT + 1U)
+#define UI_WIFI_PASSWORD_CONNECT_CONTROL (UI_WIFI_KEY_COUNT + 2U)
 
 typedef struct {
     lv_obj_t *screen[UI_PAGE_COUNT];
     lv_obj_t *home_items[UI_HOME_COUNT];
     lv_obj_t *settings_items[UI_SETTINGS_COUNT];
+    lv_obj_t *settings_wifi_items[UI_WIFI_VISIBLE_ROWS];
+    lv_obj_t *settings_wifi_titles[UI_WIFI_VISIBLE_ROWS];
+    lv_obj_t *settings_wifi_details[UI_WIFI_VISIBLE_ROWS];
+    lv_obj_t *settings_debug_items[UI_DEBUG_SETTINGS_COUNT];
     lv_obj_t *map;
     lv_obj_t *map_nodes[UI_MAX_NODES];
     lv_obj_t *map_node_ids[UI_MAX_NODES];
@@ -118,6 +141,18 @@ typedef struct {
     lv_obj_t *settings_unlock_status;
     lv_obj_t *settings_initialize_status;
     lv_obj_t *settings_assistant_status;
+    lv_obj_t *settings_volume_value;
+    lv_obj_t *settings_volume_bar;
+    lv_obj_t *settings_wifi_status;
+    lv_obj_t *settings_wifi_list_title;
+    lv_obj_t *settings_password_ssid;
+    lv_obj_t *settings_password_value;
+    lv_obj_t *settings_password_keys[UI_WIFI_KEY_COUNT];
+    lv_obj_t *settings_password_key_labels[UI_WIFI_KEY_COUNT];
+    lv_obj_t *settings_password_mode;
+    lv_obj_t *settings_password_mode_label;
+    lv_obj_t *settings_password_delete;
+    lv_obj_t *settings_password_connect;
     lv_obj_t *play_circuit;
     lv_obj_t *play_code;
     lv_obj_t *play_title;
@@ -144,7 +179,18 @@ static const char *TAG = "app_ui";
 static ui_objects_t s_ui;
 static ui_page_t s_page = UI_PAGE_HOME;
 static uint8_t s_home_selection = UI_HOME_CAMPAIGN;
-static uint8_t s_settings_selection = UI_SETTINGS_SPEAKER_TEST;
+static uint8_t s_settings_selection = UI_SETTINGS_VOLUME;
+static uint8_t s_settings_wifi_selection;
+static uint8_t s_settings_wifi_window;
+static uint8_t s_settings_wifi_count;
+static bool s_settings_wifi_scan_mode;
+static bool s_settings_wifi_scan_pending;
+static c6_network_scan_result_t s_settings_wifi_scan_results[C6_NETWORK_SCAN_MAX];
+static char s_settings_wifi_selected_ssid[C6_NETWORK_SSID_MAX + 1U];
+static char s_settings_wifi_password[C6_NETWORK_PASSWORD_MAX + 1U];
+static uint8_t s_settings_wifi_keyboard_selection;
+static uint8_t s_settings_wifi_keyboard_mode;
+static uint8_t s_settings_debug_selection = UI_DEBUG_SPEAKER_TEST;
 static uint16_t s_node_count;
 static uint16_t s_selected_node;
 static int32_t s_map_offset_x;
@@ -169,6 +215,10 @@ static uint32_t s_play_voice_generation;
 static bool s_programmer_owns_input;
 static char s_play_goal_text[384];
 static int64_t s_last_play_health_log_us;
+static bool s_play_invalid_link_prompt_active;
+static int64_t s_play_last_prompt_us;
+
+#define UI_GAMEPLAY_PROMPT_COOLDOWN_US 3000000LL
 
 static const campaign_node_t *ui_nodes(void)
 {
@@ -262,6 +312,9 @@ static void ui_refresh_campaign(void);
 static void ui_refresh_detail(void);
 static void ui_refresh_play(void);
 static void ui_refresh_success(void);
+static void ui_refresh_volume_settings(void);
+static void ui_refresh_wifi_selection(void);
+static void ui_refresh_debug_selection(void);
 static void ui_create_play_screen(void);
 static void ui_create_success_screen(void);
 static void ui_exit_shooter_to_campaign(void);
@@ -467,6 +520,12 @@ static void ui_back_event_cb(lv_event_t *event)
     }
     if (s_page == UI_PAGE_SHOOTER) {
         ui_exit_shooter_to_campaign();
+    } else if (s_page == UI_PAGE_SETTINGS_VOLUME ||
+               s_page == UI_PAGE_SETTINGS_WIFI ||
+               s_page == UI_PAGE_SETTINGS_WIFI_PASSWORD ||
+               s_page == UI_PAGE_SETTINGS_DEBUG) {
+        ui_load_page(s_page == UI_PAGE_SETTINGS_WIFI_PASSWORD ?
+                     UI_PAGE_SETTINGS_WIFI : UI_PAGE_SETTINGS);
     } else if (s_page == UI_PAGE_SUCCESS) {
         ui_load_page(UI_PAGE_PLAY);
     } else if (s_page == UI_PAGE_PLAY || s_page == UI_PAGE_DETAIL) {
@@ -588,6 +647,38 @@ static lv_obj_t *ui_create_action_item(lv_obj_t *parent,
     return item;
 }
 
+static lv_obj_t *ui_create_settings_item(lv_obj_t *parent,
+                                         int32_t x,
+                                         int32_t y,
+                                         int32_t width,
+                                         int32_t height,
+                                         const char *section,
+                                         const char *title,
+                                         lv_event_cb_t callback,
+                                         void *user_data)
+{
+    lv_obj_t *item = lv_button_create(parent);
+    lv_obj_set_pos(item, x, y);
+    lv_obj_set_size(item, width, height);
+    lv_obj_set_style_pad_all(item, 0, 0);
+    ui_style_action_item(item, false, true);
+    if (callback != NULL) {
+        lv_obj_add_event_cb(item, callback, LV_EVENT_CLICKED, user_data);
+    }
+
+    ui_create_label(item, section, 22, 14, width - 84, UI_COLOR_AMBER);
+    lv_obj_t *title_label = ui_create_label(item, title, 22, 38, width - 86, UI_COLOR_TEXT);
+    lv_obj_set_style_text_font(title_label, &app_ui_font_cn_24, 0);
+    lv_label_set_long_mode(title_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_height(title_label, 30);
+    ui_create_accent(item, 22, 74, width - 86, UI_COLOR_CYAN_DIM);
+
+    lv_obj_t *arrow = ui_create_label(item, ">", width - 54, 42, 32, UI_COLOR_CYAN);
+    lv_obj_set_style_text_font(arrow, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_align(arrow, LV_TEXT_ALIGN_CENTER, 0);
+    return item;
+}
+
 static void ui_refresh_home_selection(void)
 {
     for (uint8_t index = 0; index < UI_HOME_COUNT; ++index) {
@@ -639,29 +730,302 @@ static void ui_refresh_settings_selection(void)
         s_last_progress_sync_status = status;
         s_progress_sync_status_initialized = true;
     }
-    if (s_ui.settings_unlock_status != NULL) {
-        lv_label_set_text(s_ui.settings_unlock_status,
-                          s_unlock_all_nodes ? "全部关卡已解锁" :
-                          "选中后按中键解锁（仅本次上电）");
-        lv_obj_set_style_text_color(
-            s_ui.settings_unlock_status,
-            lv_color_hex(s_unlock_all_nodes ? UI_COLOR_GREEN : UI_COLOR_MUTED), 0);
-    }
-    if (s_ui.settings_initialize_status != NULL) {
-        lv_label_set_text(s_ui.settings_initialize_status,
-                          s_initialize_error ? "初始化失败，请稍后重试" :
-                          "按中键清空通关记录");
-        lv_obj_set_style_text_color(
-            s_ui.settings_initialize_status,
-            lv_color_hex(s_initialize_error ? UI_COLOR_DANGER : UI_COLOR_MUTED), 0);
-    }
     if (s_ui.settings_assistant_status != NULL) {
         const bool remote = assistant_mode_get() == ASSISTANT_MODE_REMOTE;
         lv_label_set_text(s_ui.settings_assistant_status,
-                          remote ? "当前使用后端助教\n按中键切换" :
-                          "当前使用内置助教\n按中键切换");
+                          remote ? "当前：后端助教" : "当前：内置助教");
         lv_obj_set_style_text_color(s_ui.settings_assistant_status,
                                     lv_color_hex(remote ? UI_COLOR_GREEN : UI_COLOR_CYAN), 0);
+    }
+}
+
+static void ui_refresh_volume_settings(void)
+{
+    if (s_ui.settings_volume_value == NULL || s_ui.settings_volume_bar == NULL) return;
+    const uint8_t volume = audio_self_test_get_master_volume();
+    lv_label_set_text_fmt(s_ui.settings_volume_value, "%u%%", (unsigned)volume);
+    if (volume == 0U) {
+        lv_obj_add_flag(s_ui.settings_volume_bar, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_remove_flag(s_ui.settings_volume_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_width(s_ui.settings_volume_bar, (int32_t)(702U * volume / 100U));
+    }
+}
+
+static void ui_refresh_wifi_selection(void)
+{
+    c6_network_status_t network;
+    c6_network_get_status(&network);
+    if (s_settings_wifi_scan_pending && network.state != C6_NETWORK_SCANNING) {
+        s_settings_wifi_count = c6_network_get_scan_results(
+            s_settings_wifi_scan_results, C6_NETWORK_SCAN_MAX);
+        s_settings_wifi_scan_mode = true;
+        s_settings_wifi_scan_pending = false;
+        s_settings_wifi_selection = 0U;
+        s_settings_wifi_window = 0U;
+    }
+    const uint8_t count = s_settings_wifi_scan_mode ? s_settings_wifi_count :
+                          (uint8_t)(UI_WIFI_PRESET_COUNT + 1U);
+    if (count > 0U && s_settings_wifi_selection >= count) s_settings_wifi_selection = count - 1U;
+    if (s_settings_wifi_selection < s_settings_wifi_window ||
+        s_settings_wifi_selection >= s_settings_wifi_window + UI_WIFI_VISIBLE_ROWS) {
+        s_settings_wifi_window = (uint8_t)((s_settings_wifi_selection / UI_WIFI_VISIBLE_ROWS) *
+                                           UI_WIFI_VISIBLE_ROWS);
+    }
+    if (s_ui.settings_wifi_list_title != NULL) {
+        lv_label_set_text(s_ui.settings_wifi_list_title,
+                          s_settings_wifi_scan_mode ? "附近网络" : "预设热点");
+    }
+    for (uint8_t row = 0U; row < UI_WIFI_VISIBLE_ROWS; ++row) {
+        const uint8_t index = s_settings_wifi_window + row;
+        if (index < count) {
+            const char *title;
+            const char *detail;
+            char detail_text[64];
+            if (s_settings_wifi_scan_mode) {
+                const c6_network_scan_result_t *result = &s_settings_wifi_scan_results[index];
+                title = result->ssid;
+                snprintf(detail_text, sizeof(detail_text), "%ddBm  %s", result->rssi,
+                         result->requires_password ? "需要密码" : "开放网络");
+                detail = detail_text;
+            } else if (index == 0U) {
+                title = "扫描附近网络";
+                detail = s_settings_wifi_scan_pending ? "正在扫描..." : "按中键开始扫描";
+            } else {
+                title = c6_network_get_preset_ssid(index - 1U);
+                detail = title[0] == '\0' ? "未设置热点" : "使用预设密码连接";
+            }
+            lv_obj_remove_flag(s_ui.settings_wifi_items[row], LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(s_ui.settings_wifi_titles[row], title);
+            lv_label_set_text(s_ui.settings_wifi_details[row], detail);
+            ui_style_action_item(s_ui.settings_wifi_items[row],
+                                 index == s_settings_wifi_selection, true);
+        } else {
+            lv_obj_add_flag(s_ui.settings_wifi_items[row], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_ui.settings_wifi_status != NULL) {
+        const char *text = network.state == C6_NETWORK_SCANNING ? "正在扫描" :
+                           network.state == C6_NETWORK_CONNECTING ? "正在连接" :
+                           network.connected ? network.current_ssid :
+                           network.state == C6_NETWORK_FAILED ? "连接失败" : "未连接";
+        lv_label_set_text(s_ui.settings_wifi_status, text);
+        lv_obj_set_style_text_color(s_ui.settings_wifi_status,
+                                    lv_color_hex(network.connected ? UI_COLOR_GREEN :
+                                                 network.state == C6_NETWORK_FAILED ? UI_COLOR_DANGER :
+                                                 UI_COLOR_MUTED), 0);
+    }
+}
+
+static void ui_refresh_wifi_password(void)
+{
+    if (s_ui.settings_password_ssid == NULL || s_ui.settings_password_value == NULL) return;
+    char masked[C6_NETWORK_PASSWORD_MAX + 1U] = {0};
+    const size_t length = strlen(s_settings_wifi_password);
+    memset(masked, '*', length);
+    lv_label_set_text(s_ui.settings_password_ssid, s_settings_wifi_selected_ssid);
+    lv_label_set_text(s_ui.settings_password_value, masked);
+    static const char *const keymaps[] = {
+        "abcdefghijklmnopqrstuvwxyz0123456789-_@.",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_@.",
+        "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~        ",
+    };
+    static const char *const mode_labels[] = {"abc", "ABC", "#+="};
+    const char *keymap = keymaps[s_settings_wifi_keyboard_mode];
+    for (uint8_t index = 0U; index < UI_WIFI_KEY_COUNT; ++index) {
+        char key_label[3] = {keymap[index], '\0', '\0'};
+        if (keymap[index] == ' ') strlcpy(key_label, "SP", sizeof(key_label));
+        lv_label_set_text(s_ui.settings_password_key_labels[index], key_label);
+        ui_style_action_item(s_ui.settings_password_keys[index],
+                             s_settings_wifi_keyboard_selection == index, true);
+    }
+    lv_label_set_text(s_ui.settings_password_mode_label, mode_labels[s_settings_wifi_keyboard_mode]);
+    ui_style_action_item(s_ui.settings_password_mode,
+                         s_settings_wifi_keyboard_selection == UI_WIFI_PASSWORD_MODE_CONTROL, true);
+    ui_style_action_item(s_ui.settings_password_delete,
+                         s_settings_wifi_keyboard_selection == UI_WIFI_PASSWORD_DELETE_CONTROL, true);
+    ui_style_action_item(s_ui.settings_password_connect,
+                         s_settings_wifi_keyboard_selection == UI_WIFI_PASSWORD_CONNECT_CONTROL, true);
+}
+
+static void ui_activate_wifi_selection(void)
+{
+    if (!s_settings_wifi_scan_mode) {
+        if (s_settings_wifi_selection == 0U) {
+            if (c6_network_request_scan() == ESP_OK) {
+                s_settings_wifi_scan_pending = true;
+                audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+            } else {
+                audio_self_test_play_effect(AUDIO_EFFECT_ERROR);
+            }
+        } else if (c6_network_connect_preset(s_settings_wifi_selection - 1U) == ESP_OK) {
+            audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+        } else {
+            audio_self_test_play_effect(AUDIO_EFFECT_ERROR);
+        }
+        ui_refresh_wifi_selection();
+        return;
+    }
+    if (s_settings_wifi_selection >= s_settings_wifi_count) return;
+    const c6_network_scan_result_t *result =
+        &s_settings_wifi_scan_results[s_settings_wifi_selection];
+    if (!result->requires_password) {
+        if (c6_network_connect_scan_result(s_settings_wifi_selection, "") == ESP_OK) {
+            audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+        } else {
+            audio_self_test_play_effect(AUDIO_EFFECT_ERROR);
+        }
+        return;
+    }
+    strlcpy(s_settings_wifi_selected_ssid, result->ssid, sizeof(s_settings_wifi_selected_ssid));
+    s_settings_wifi_password[0] = '\0';
+    s_settings_wifi_keyboard_selection = 0U;
+    s_settings_wifi_keyboard_mode = 0U;
+    audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+    ui_load_page(UI_PAGE_SETTINGS_WIFI_PASSWORD);
+}
+
+static void ui_refresh_debug_selection(void)
+{
+    for (uint8_t index = 0U; index < UI_DEBUG_SETTINGS_COUNT; ++index) {
+        ui_style_action_item(s_ui.settings_debug_items[index],
+                             index == s_settings_debug_selection, true);
+    }
+    if (s_ui.settings_unlock_status != NULL) {
+        lv_label_set_text(s_ui.settings_unlock_status,
+                          s_unlock_all_nodes ? "全部关卡已解锁" : "按中键解锁，仅本次上电");
+        lv_obj_set_style_text_color(s_ui.settings_unlock_status,
+                                    lv_color_hex(s_unlock_all_nodes ? UI_COLOR_GREEN : UI_COLOR_MUTED), 0);
+    }
+    if (s_ui.settings_initialize_status != NULL) {
+        lv_label_set_text(s_ui.settings_initialize_status,
+                          s_initialize_error ? "初始化失败，请稍后重试" : "按中键清空通关记录");
+        lv_obj_set_style_text_color(s_ui.settings_initialize_status,
+                                    lv_color_hex(s_initialize_error ? UI_COLOR_DANGER : UI_COLOR_MUTED), 0);
+    }
+}
+
+static void ui_initialize_campaign_progress(void)
+{
+    const esp_err_t err = campaign_progress_clear();
+    s_initialize_error = err != ESP_OK;
+    if (err != ESP_OK) {
+        audio_self_test_play_effect(AUDIO_EFFECT_ERROR);
+        ui_refresh_debug_selection();
+        return;
+    }
+
+    memset(s_completed_nodes, 0, sizeof(s_completed_nodes));
+    s_unlock_all_nodes = false;
+    const campaign_content_meta_t meta = campaign_content_meta();
+    const campaign_node_t *nodes = ui_nodes();
+    s_selected_node = 0U;
+    for (uint16_t index = 0U; index < s_node_count; ++index) {
+        if (nodes[index].id == meta.initial_level_id) {
+            s_selected_node = index;
+            break;
+        }
+    }
+    audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+    ui_refresh_debug_selection();
+    ui_refresh_campaign();
+    ui_refresh_detail();
+    ESP_LOGI(TAG, "campaign progress initialized from debug settings");
+}
+
+static void ui_activate_debug_selection(void)
+{
+    if (s_settings_debug_selection == UI_DEBUG_SPEAKER_TEST) return;
+    if (s_settings_debug_selection == UI_DEBUG_UNLOCK_ALL) {
+        if (!s_unlock_all_nodes) {
+            s_unlock_all_nodes = true;
+            audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+            ui_refresh_debug_selection();
+            ui_refresh_campaign();
+            ui_refresh_detail();
+            ESP_LOGI(TAG, "all campaign nodes unlocked for this boot");
+        }
+        return;
+    }
+    ui_initialize_campaign_progress();
+}
+
+static void ui_activate_settings_selection(void)
+{
+    switch (s_settings_selection) {
+    case UI_SETTINGS_VOLUME:
+        audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+        ui_load_page(UI_PAGE_SETTINGS_VOLUME);
+        break;
+    case UI_SETTINGS_WIFI:
+        audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+        ui_load_page(UI_PAGE_SETTINGS_WIFI);
+        break;
+    case UI_SETTINGS_PROGRESS_SYNC: {
+        const esp_err_t err = progress_sync_request(ui_nodes(), s_node_count, s_completed_nodes);
+        audio_self_test_play_effect(err == ESP_OK ? AUDIO_EFFECT_CONFIRM : AUDIO_EFFECT_ERROR);
+        ui_refresh_settings_selection();
+        break;
+    }
+    case UI_SETTINGS_ASSISTANT_MODE: {
+        const assistant_mode_t next = assistant_mode_get() == ASSISTANT_MODE_LOCAL ?
+            ASSISTANT_MODE_REMOTE : ASSISTANT_MODE_LOCAL;
+        const esp_err_t err = assistant_mode_set(next);
+        if (err == ESP_OK) {
+            assistant_router_handle_mode_change();
+            audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+        } else {
+            audio_self_test_play_effect(AUDIO_EFFECT_ERROR);
+        }
+        ui_refresh_settings_selection();
+        break;
+    }
+    case UI_SETTINGS_DEBUG:
+        audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+        ui_load_page(UI_PAGE_SETTINGS_DEBUG);
+        break;
+    default:
+        break;
+    }
+}
+
+static void ui_adjust_settings_volume(int32_t delta)
+{
+    int32_t volume = (int32_t)audio_self_test_get_master_volume() + delta;
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
+    if (volume != audio_self_test_get_master_volume()) {
+        audio_self_test_set_master_volume((uint8_t)volume);
+        audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+    }
+    ui_refresh_volume_settings();
+}
+
+static void ui_move_settings_selection(int32_t direction_x, int32_t direction_y)
+{
+    uint8_t next = s_settings_selection;
+    if (direction_x < 0) {
+        if (s_settings_selection == UI_SETTINGS_WIFI) next = UI_SETTINGS_VOLUME;
+        else if (s_settings_selection == UI_SETTINGS_ASSISTANT_MODE) next = UI_SETTINGS_PROGRESS_SYNC;
+        else if (s_settings_selection == UI_SETTINGS_DEBUG) next = UI_SETTINGS_PROGRESS_SYNC;
+    } else if (direction_x > 0) {
+        if (s_settings_selection == UI_SETTINGS_VOLUME) next = UI_SETTINGS_WIFI;
+        else if (s_settings_selection == UI_SETTINGS_PROGRESS_SYNC) next = UI_SETTINGS_ASSISTANT_MODE;
+        else if (s_settings_selection == UI_SETTINGS_DEBUG) next = UI_SETTINGS_ASSISTANT_MODE;
+    } else if (direction_y < 0) {
+        if (s_settings_selection == UI_SETTINGS_PROGRESS_SYNC) next = UI_SETTINGS_VOLUME;
+        else if (s_settings_selection == UI_SETTINGS_ASSISTANT_MODE) next = UI_SETTINGS_WIFI;
+        else if (s_settings_selection == UI_SETTINGS_DEBUG) next = UI_SETTINGS_PROGRESS_SYNC;
+    } else if (direction_y > 0) {
+        if (s_settings_selection == UI_SETTINGS_VOLUME) next = UI_SETTINGS_PROGRESS_SYNC;
+        else if (s_settings_selection == UI_SETTINGS_WIFI) next = UI_SETTINGS_ASSISTANT_MODE;
+        else if (s_settings_selection == UI_SETTINGS_PROGRESS_SYNC ||
+                 s_settings_selection == UI_SETTINGS_ASSISTANT_MODE) next = UI_SETTINGS_DEBUG;
+    }
+    if (next != s_settings_selection) {
+        s_settings_selection = next;
+        audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+        ui_refresh_settings_selection();
     }
 }
 
@@ -681,6 +1045,77 @@ static void ui_settings_item_event_cb(lv_event_t *event)
     audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
     ui_refresh_settings_selection();
     audio_self_test_set_tone_enabled(false);
+    ui_activate_settings_selection();
+}
+
+static void ui_volume_adjust_event_cb(lv_event_t *event)
+{
+    const int32_t delta = (int32_t)(intptr_t)lv_event_get_user_data(event);
+    if (delta == 0) {
+        if (audio_self_test_get_master_volume() != 70U) {
+            audio_self_test_set_master_volume(70U);
+            audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+        }
+        ui_refresh_volume_settings();
+        return;
+    }
+    ui_adjust_settings_volume(delta);
+}
+
+static void ui_wifi_item_event_cb(lv_event_t *event)
+{
+    const uintptr_t value = (uintptr_t)lv_event_get_user_data(event);
+    s_settings_wifi_selection = s_settings_wifi_window + (uint8_t)(value - 1U);
+    audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+    ui_refresh_wifi_selection();
+    ui_activate_wifi_selection();
+}
+
+static const char *ui_wifi_password_keymap(void)
+{
+    static const char *const keymaps[] = {
+        "abcdefghijklmnopqrstuvwxyz0123456789-_@.",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_@.",
+        "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~        ",
+    };
+    return keymaps[s_settings_wifi_keyboard_mode];
+}
+
+static void ui_wifi_password_insert(uint8_t index)
+{
+    const char *keymap = ui_wifi_password_keymap();
+    const size_t length = strlen(s_settings_wifi_password);
+    if (index < UI_WIFI_KEY_COUNT && length < C6_NETWORK_PASSWORD_MAX) {
+        s_settings_wifi_password[length] = keymap[index];
+        s_settings_wifi_password[length + 1U] = '\0';
+        audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+        ui_refresh_wifi_password();
+    }
+}
+
+static void ui_wifi_password_key_event_cb(lv_event_t *event)
+{
+    const uintptr_t index = (uintptr_t)lv_event_get_user_data(event);
+    s_settings_wifi_keyboard_selection = (uint8_t)index;
+    ui_wifi_password_insert((uint8_t)index);
+}
+
+static void ui_wifi_password_mode_event_cb(lv_event_t *event)
+{
+    (void)event;
+    s_settings_wifi_keyboard_selection = UI_WIFI_PASSWORD_MODE_CONTROL;
+    s_settings_wifi_keyboard_mode = (s_settings_wifi_keyboard_mode + 1U) % 3U;
+    audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+    ui_refresh_wifi_password();
+}
+
+static void ui_debug_item_event_cb(lv_event_t *event)
+{
+    const uintptr_t value = (uintptr_t)lv_event_get_user_data(event);
+    s_settings_debug_selection = (uint8_t)(value - 1U);
+    audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+    ui_refresh_debug_selection();
+    ui_activate_debug_selection();
 }
 
 static void ui_create_home_screen(void)
@@ -1612,6 +2047,15 @@ static void ui_log_play_topology(const board_snapshot_t *snapshot,
     }
 }
 
+static void ui_request_gameplay_prompt(voice_gameplay_prompt_t prompt)
+{
+    const int64_t now_us = esp_timer_get_time();
+    if (now_us - s_play_last_prompt_us < UI_GAMEPLAY_PROMPT_COOLDOWN_US) return;
+    if (voice_assistant_request_gameplay_prompt(prompt) == ESP_OK) {
+        s_play_last_prompt_us = now_us;
+    }
+}
+
 static void ui_refresh_play(void)
 {
     const campaign_node_t *node = &ui_nodes()[s_selected_node];
@@ -1640,6 +2084,13 @@ static void ui_refresh_play(void)
         circuit_layout_compute(&s_play_snapshot, 660, 492, &s_play_layout);
         ui_log_play_topology(&s_play_snapshot, &s_play_layout);
         if (s_ui.play_circuit != NULL) lv_obj_invalidate(s_ui.play_circuit);
+    }
+    const bool invalid_links = latest.invalid_link_count > 0U || latest.link_overflow;
+    if (topology_changed) {
+        if (!first_snapshot && invalid_links && !s_play_invalid_link_prompt_active) {
+            ui_request_gameplay_prompt(VOICE_GAMEPLAY_PROMPT_INVALID_LINK);
+        }
+        s_play_invalid_link_prompt_active = invalid_links;
     }
     if (s_play_topology_revision != 0U &&
         latest.topology_revision != s_play_topology_revision &&
@@ -1697,9 +2148,20 @@ static void ui_refresh_play(void)
     if (judge_changed && judge.level_id == node->id) {
         if (judge.phase == GAME_JUDGE_PASSED) {
             audio_self_test_play_effect(AUDIO_EFFECT_WIN);
+            ui_request_gameplay_prompt(VOICE_GAMEPLAY_PROMPT_CHECK_PASSED);
         } else if (judge.phase == GAME_JUDGE_FAILED ||
                    judge.phase == GAME_JUDGE_PRECHECK_ERROR) {
             audio_self_test_play_effect(AUDIO_EFFECT_ERROR);
+            if (judge.phase == GAME_JUDGE_FAILED) {
+                ui_request_gameplay_prompt(VOICE_GAMEPLAY_PROMPT_CHECK_FAILED);
+            } else if (judge.precheck_code == CIRCUIT_CHECK_WRONG_INPUT_COUNT ||
+                       judge.precheck_code == CIRCUIT_CHECK_WRONG_OUTPUT_COUNT) {
+                ui_request_gameplay_prompt(VOICE_GAMEPLAY_PROMPT_WRONG_BLOCK_COUNT);
+            } else if (judge.precheck_code == CIRCUIT_CHECK_INCOMPLETE) {
+                ui_request_gameplay_prompt(VOICE_GAMEPLAY_PROMPT_INCOMPLETE_CIRCUIT);
+            }
+        } else if (judge.phase == GAME_JUDGE_CANCELLED && s_page == UI_PAGE_PLAY) {
+            ui_request_gameplay_prompt(VOICE_GAMEPLAY_PROMPT_CHECK_CANCELLED);
         }
     }
     if (pass_just_completed && s_page == UI_PAGE_PLAY) {
@@ -1833,35 +2295,271 @@ static void ui_create_settings_screen(void)
         22, 226, 200, UI_COLOR_MUTED);
 
     ui_create_label(screen, "选择功能", 282, 98, 500, UI_COLOR_CYAN);
-    s_ui.settings_items[UI_SETTINGS_SPEAKER_TEST] = ui_create_action_item(
-        screen, 282, 126, 350, 126, "声音测试", "扬声器测试", "选中后按住中键播放 1 kHz",
-        ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_SPEAKER_TEST + 1U));
-    s_ui.settings_items[UI_SETTINGS_PROGRESS_SYNC] = ui_create_action_item(
-        screen, 656, 126, 350, 126, "云端同步", "上传云存档", "",
+    s_ui.settings_items[UI_SETTINGS_VOLUME] = ui_create_settings_item(
+        screen, 282, 122, 350, 126, "声音输出", "音量调整",
+        ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_VOLUME + 1U));
+    lv_obj_t *volume_status = ui_create_label(
+        s_ui.settings_items[UI_SETTINGS_VOLUME], "调节本次开机音量", 22, 90, 306, UI_COLOR_MUTED);
+    lv_obj_set_height(volume_status, 24);
+    s_ui.settings_items[UI_SETTINGS_WIFI] = ui_create_settings_item(
+        screen, 656, 122, 350, 126, "网络连接", "Wi-Fi 选择",
+        ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_WIFI + 1U));
+    lv_obj_t *wifi_status = ui_create_label(
+        s_ui.settings_items[UI_SETTINGS_WIFI], "预设热点与连接状态", 22, 90, 306, UI_COLOR_MUTED);
+    lv_obj_set_height(wifi_status, 24);
+    s_ui.settings_items[UI_SETTINGS_PROGRESS_SYNC] = ui_create_settings_item(
+        screen, 282, 264, 350, 126, "云端同步", "上传云存档",
         ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_PROGRESS_SYNC + 1U));
     s_ui.settings_sync_status = ui_create_label(
-        s_ui.settings_items[UI_SETTINGS_PROGRESS_SYNC], "", 22, 84, 306, UI_COLOR_MUTED);
-    s_ui.settings_items[UI_SETTINGS_UNLOCK_ALL] = ui_create_action_item(
-        screen, 282, 272, 350, 126, "辅助功能", "解锁所有关卡", "",
-        ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_UNLOCK_ALL + 1U));
-    s_ui.settings_unlock_status = ui_create_label(
-        s_ui.settings_items[UI_SETTINGS_UNLOCK_ALL], "", 22, 84, 306, UI_COLOR_MUTED);
-    s_ui.settings_items[UI_SETTINGS_INITIALIZE] = ui_create_action_item(
-        screen, 656, 272, 350, 126, "游玩记录", "初始化", "",
-        ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_INITIALIZE + 1U));
-    s_ui.settings_initialize_status = ui_create_label(
-        s_ui.settings_items[UI_SETTINGS_INITIALIZE], "", 22, 84, 306, UI_COLOR_MUTED);
-    s_ui.settings_items[UI_SETTINGS_ASSISTANT_MODE] = ui_create_action_item(
-        screen, 282, 418, 724, 142, "AI 助教", "内置 / 后端", "后端地址由本机配置",
+        s_ui.settings_items[UI_SETTINGS_PROGRESS_SYNC], "", 22, 90, 306, UI_COLOR_MUTED);
+    lv_obj_set_height(s_ui.settings_sync_status, 24);
+    s_ui.settings_items[UI_SETTINGS_ASSISTANT_MODE] = ui_create_settings_item(
+        screen, 656, 264, 350, 126, "AI 助教", "内置 / 后端",
         ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_ASSISTANT_MODE + 1U));
     s_ui.settings_assistant_status = ui_create_label(
-        s_ui.settings_items[UI_SETTINGS_ASSISTANT_MODE], "", 22, 84, 620, UI_COLOR_CYAN);
-    ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_SPEAKER_TEST], UI_COLOR_CYAN);
+        s_ui.settings_items[UI_SETTINGS_ASSISTANT_MODE], "", 22, 90, 306, UI_COLOR_CYAN);
+    lv_obj_set_height(s_ui.settings_assistant_status, 24);
+    s_ui.settings_items[UI_SETTINGS_DEBUG] = ui_create_settings_item(
+        screen, 282, 406, 724, 162, "开发工具", "调试设置",
+        ui_settings_item_event_cb, (void *)(uintptr_t)(UI_SETTINGS_DEBUG + 1U));
+    lv_obj_t *debug_status = ui_create_label(
+        s_ui.settings_items[UI_SETTINGS_DEBUG], "扬声器测试 / 解锁所有关卡 / 初始化", 22, 90, 640, UI_COLOR_MUTED);
+    lv_obj_set_height(debug_status, 24);
+    ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_VOLUME], UI_COLOR_CYAN);
+    ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_WIFI], UI_COLOR_GREEN);
     ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_PROGRESS_SYNC], UI_COLOR_GREEN);
-    ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_UNLOCK_ALL], UI_COLOR_PINK);
-    ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_INITIALIZE], UI_COLOR_YELLOW);
-    ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_ASSISTANT_MODE], UI_COLOR_GREEN);
+    ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_ASSISTANT_MODE], UI_COLOR_PINK);
+    ui_add_pixel_corners(s_ui.settings_items[UI_SETTINGS_DEBUG], UI_COLOR_YELLOW);
     ui_refresh_settings_selection();
+}
+
+static lv_obj_t *ui_create_volume_button(lv_obj_t *parent,
+                                         int32_t x,
+                                         const char *label,
+                                         int32_t delta)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_set_pos(button, x, 232);
+    lv_obj_set_size(button, 206, 52);
+    ui_style_action_item(button, false, true);
+    lv_obj_add_event_cb(button, ui_volume_adjust_event_cb, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)delta);
+    lv_obj_t *text = lv_label_create(button);
+    ui_set_font(text);
+    lv_label_set_text(text, label);
+    lv_obj_set_style_text_color(text, lv_color_hex(UI_COLOR_TEXT), 0);
+    lv_obj_center(text);
+    return button;
+}
+
+static void ui_create_settings_volume_screen(void)
+{
+    lv_obj_t *screen = lv_obj_create(NULL);
+    s_ui.screen[UI_PAGE_SETTINGS_VOLUME] = screen;
+    ui_style_screen(screen);
+    ui_create_starfield(screen);
+    ui_create_header(screen, "小飞船设置", "音量调整", true);
+
+    lv_obj_t *panel = ui_create_panel(screen, 132, 118, 760, 370);
+    ui_add_pixel_corners(panel, UI_COLOR_CYAN);
+    ui_create_accent(panel, 0, 0, 220, UI_COLOR_CYAN);
+    ui_create_label(panel, "扬声器输出", 28, 28, 280, UI_COLOR_CYAN);
+    s_ui.settings_volume_value = ui_create_label(panel, "", 556, 20, 170, UI_COLOR_TEXT);
+    lv_obj_set_style_text_font(s_ui.settings_volume_value, &app_ui_font_cn_24, 0);
+    lv_obj_set_style_text_align(s_ui.settings_volume_value, LV_TEXT_ALIGN_RIGHT, 0);
+    ui_create_label(panel, "左右摇杆每次调整 5%", 28, 68, 480, UI_COLOR_MUTED);
+    ui_create_accent(panel, 28, 102, 704, UI_COLOR_BORDER);
+
+    lv_obj_t *volume_track = ui_create_panel(panel, 28, 132, 704, 30);
+    lv_obj_set_style_bg_color(volume_track, lv_color_hex(UI_COLOR_SURFACE_ALT), 0);
+    lv_obj_set_style_border_color(volume_track, lv_color_hex(UI_COLOR_BORDER), 0);
+    s_ui.settings_volume_bar = lv_obj_create(volume_track);
+    lv_obj_set_pos(s_ui.settings_volume_bar, 0, 0);
+    lv_obj_set_height(s_ui.settings_volume_bar, 28);
+    lv_obj_set_style_bg_color(s_ui.settings_volume_bar, lv_color_hex(UI_COLOR_CYAN), 0);
+    lv_obj_set_style_bg_opa(s_ui.settings_volume_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_ui.settings_volume_bar, 0, 0);
+    lv_obj_set_style_radius(s_ui.settings_volume_bar, 1, 0);
+    lv_obj_clear_flag(s_ui.settings_volume_bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    ui_create_volume_button(panel, 28, "- 5%", -5);
+    ui_create_volume_button(panel, 277, "70%", 0);
+    ui_create_volume_button(panel, 526, "+ 5%", 5);
+    ui_create_label(panel, "当前设置仅本次开机有效", 28, 314, 704, UI_COLOR_MUTED);
+    ui_refresh_volume_settings();
+}
+
+static void ui_create_settings_wifi_screen(void)
+{
+    lv_obj_t *screen = lv_obj_create(NULL);
+    s_ui.screen[UI_PAGE_SETTINGS_WIFI] = screen;
+    ui_style_screen(screen);
+    ui_create_starfield(screen);
+    ui_create_header(screen, "小飞船设置", "Wi-Fi 选择", true);
+
+    lv_obj_t *side = ui_create_panel(screen, 18, 90, 244, 492);
+    ui_add_pixel_corners(side, UI_COLOR_GREEN);
+    ui_create_accent(side, 0, 0, 112, UI_COLOR_GREEN);
+    lv_obj_t *side_title = ui_create_label(side, "网络状态", 22, 24, 200, UI_COLOR_TEXT);
+    lv_obj_set_style_text_font(side_title, &app_ui_font_cn_24, 0);
+    s_ui.settings_wifi_status = ui_create_label(side, "", 22, 70, 200, UI_COLOR_GREEN);
+    lv_obj_set_height(s_ui.settings_wifi_status, 52);
+    ui_create_accent(side, 22, 152, 200, UI_COLOR_BORDER);
+    ui_create_label(side, "自动连接预设热点\n\n扫描后可输入密码\n\n临时连接不保存", 22, 180, 200, UI_COLOR_MUTED);
+
+    s_ui.settings_wifi_list_title = ui_create_label(screen, "", 282, 98, 500, UI_COLOR_CYAN);
+    for (uint8_t row = 0U; row < UI_WIFI_VISIBLE_ROWS; ++row) {
+        s_ui.settings_wifi_items[row] = ui_create_settings_item(
+            screen, 282, 122 + row * 108, 724, 100, "", "",
+            ui_wifi_item_event_cb, (void *)(uintptr_t)(row + 1U));
+        s_ui.settings_wifi_titles[row] = ui_create_label(s_ui.settings_wifi_items[row], "",
+                                                         22, 36, 640, UI_COLOR_TEXT);
+        lv_obj_set_style_text_font(s_ui.settings_wifi_titles[row], &app_ui_font_cn_24, 0);
+        lv_obj_set_height(s_ui.settings_wifi_titles[row], 30);
+        s_ui.settings_wifi_details[row] = ui_create_label(s_ui.settings_wifi_items[row], "",
+                                                          22, 78, 640, UI_COLOR_MUTED);
+        lv_obj_set_height(s_ui.settings_wifi_details[row], 18);
+        ui_add_pixel_corners(s_ui.settings_wifi_items[row], UI_COLOR_GREEN);
+    }
+    ui_refresh_wifi_selection();
+}
+
+static void ui_wifi_password_delete(void)
+{
+    const size_t length = strlen(s_settings_wifi_password);
+    if (length > 0U) {
+        s_settings_wifi_password[length - 1U] = '\0';
+        audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+        ui_refresh_wifi_password();
+    }
+}
+
+static void ui_wifi_password_submit(void)
+{
+    if (s_settings_wifi_password[0] == '\0') {
+        audio_self_test_play_effect(AUDIO_EFFECT_ERROR);
+        return;
+    }
+    if (c6_network_connect_scan_result(s_settings_wifi_selection, s_settings_wifi_password) == ESP_OK) {
+        audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+        ui_load_page(UI_PAGE_SETTINGS_WIFI);
+    } else {
+        audio_self_test_play_effect(AUDIO_EFFECT_ERROR);
+    }
+}
+
+static void ui_wifi_password_control_event_cb(lv_event_t *event)
+{
+    const uintptr_t action = (uintptr_t)lv_event_get_user_data(event);
+    if (action == 0U) {
+        s_settings_wifi_keyboard_selection = UI_WIFI_PASSWORD_DELETE_CONTROL;
+        ui_wifi_password_delete();
+    } else {
+        s_settings_wifi_keyboard_selection = UI_WIFI_PASSWORD_CONNECT_CONTROL;
+        ui_wifi_password_submit();
+    }
+}
+
+static void ui_create_settings_wifi_password_screen(void)
+{
+    lv_obj_t *screen = lv_obj_create(NULL);
+    s_ui.screen[UI_PAGE_SETTINGS_WIFI_PASSWORD] = screen;
+    ui_style_screen(screen);
+    ui_create_starfield(screen);
+    ui_create_header(screen, "小飞船设置", "输入密码", true);
+
+    lv_obj_t *panel = ui_create_panel(screen, 18, 90, 988, 138);
+    ui_add_pixel_corners(panel, UI_COLOR_GREEN);
+    ui_create_label(panel, "网络", 22, 18, 120, UI_COLOR_CYAN);
+    s_ui.settings_password_ssid = ui_create_label(panel, "", 118, 18, 830, UI_COLOR_TEXT);
+    lv_obj_set_style_text_font(s_ui.settings_password_ssid, &app_ui_font_cn_24, 0);
+    ui_create_label(panel, "密码", 22, 76, 120, UI_COLOR_CYAN);
+    s_ui.settings_password_value = ui_create_label(panel, "", 118, 76, 830, UI_COLOR_TEXT);
+    lv_label_set_long_mode(s_ui.settings_password_value, LV_LABEL_LONG_CLIP);
+    ui_create_label(screen, "摇杆选择，中键输入，右键删除，左键取消", 18, 238, 650, UI_COLOR_MUTED);
+    s_ui.settings_password_mode = lv_button_create(screen);
+    lv_obj_set_pos(s_ui.settings_password_mode, 708, 234);
+    lv_obj_set_size(s_ui.settings_password_mode, 298, 28);
+    ui_style_action_item(s_ui.settings_password_mode, false, true);
+    lv_obj_add_event_cb(s_ui.settings_password_mode, ui_wifi_password_mode_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    s_ui.settings_password_mode_label = lv_label_create(s_ui.settings_password_mode);
+    lv_label_set_text(s_ui.settings_password_mode_label, "abc");
+    lv_obj_set_style_text_color(s_ui.settings_password_mode_label, lv_color_hex(UI_COLOR_TEXT), 0);
+    lv_obj_center(s_ui.settings_password_mode_label);
+
+    for (uint8_t index = 0U; index < UI_WIFI_KEY_COUNT; ++index) {
+        const uint8_t column = index % 10U;
+        const uint8_t row = index / 10U;
+        lv_obj_t *key = lv_button_create(screen);
+        lv_obj_set_pos(key, 18 + column * 99, 268 + row * 58);
+        lv_obj_set_size(key, 88, 48);
+        ui_style_action_item(key, false, true);
+        lv_obj_add_event_cb(key, ui_wifi_password_key_event_cb, LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)index);
+        s_ui.settings_password_key_labels[index] = lv_label_create(key);
+        lv_obj_set_style_text_color(s_ui.settings_password_key_labels[index],
+                                    lv_color_hex(UI_COLOR_TEXT), 0);
+        lv_obj_center(s_ui.settings_password_key_labels[index]);
+        s_ui.settings_password_keys[index] = key;
+    }
+    for (uint8_t index = 0U; index < 2U; ++index) {
+        lv_obj_t *button = lv_button_create(screen);
+        lv_obj_set_pos(button, 18 + index * 500, 510);
+        lv_obj_set_size(button, 480, 58);
+        ui_style_action_item(button, false, true);
+        lv_obj_add_event_cb(button, ui_wifi_password_control_event_cb, LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)index);
+        lv_obj_t *text = lv_label_create(button);
+        ui_set_font(text);
+        lv_label_set_text(text, index == 0U ? "删除" : "连接");
+        lv_obj_set_style_text_color(text, lv_color_hex(UI_COLOR_TEXT), 0);
+        lv_obj_center(text);
+        if (index == 0U) s_ui.settings_password_delete = button;
+        else s_ui.settings_password_connect = button;
+    }
+    ui_refresh_wifi_password();
+}
+
+static void ui_create_settings_debug_screen(void)
+{
+    static const char *const sections[UI_DEBUG_SETTINGS_COUNT] = {
+        "声音测试", "辅助功能", "游玩记录",
+    };
+    static const char *const titles[UI_DEBUG_SETTINGS_COUNT] = {
+        "扬声器测试", "解锁所有关卡", "初始化",
+    };
+    static const uint32_t colors[UI_DEBUG_SETTINGS_COUNT] = {
+        UI_COLOR_CYAN, UI_COLOR_PINK, UI_COLOR_YELLOW,
+    };
+
+    lv_obj_t *screen = lv_obj_create(NULL);
+    s_ui.screen[UI_PAGE_SETTINGS_DEBUG] = screen;
+    ui_style_screen(screen);
+    ui_create_starfield(screen);
+    ui_create_header(screen, "小飞船设置", "调试设置", true);
+    ui_create_label(screen, "开发工具", 150, 98, 500, UI_COLOR_CYAN);
+
+    for (uint8_t index = 0U; index < UI_DEBUG_SETTINGS_COUNT; ++index) {
+        s_ui.settings_debug_items[index] = ui_create_settings_item(
+            screen, 150, 122 + index * 142, 724, 126, sections[index], titles[index],
+            ui_debug_item_event_cb, (void *)(uintptr_t)(index + 1U));
+        if (index == UI_DEBUG_SPEAKER_TEST) {
+            lv_obj_t *status = ui_create_label(s_ui.settings_debug_items[index],
+                                               "按住中键播放 1 kHz", 22, 90, 640, UI_COLOR_MUTED);
+            lv_obj_set_height(status, 24);
+        } else if (index == UI_DEBUG_UNLOCK_ALL) {
+            s_ui.settings_unlock_status = ui_create_label(s_ui.settings_debug_items[index], "",
+                                                          22, 90, 640, UI_COLOR_MUTED);
+            lv_obj_set_height(s_ui.settings_unlock_status, 24);
+        } else {
+            s_ui.settings_initialize_status = ui_create_label(s_ui.settings_debug_items[index], "",
+                                                              22, 90, 640, UI_COLOR_MUTED);
+            lv_obj_set_height(s_ui.settings_initialize_status, 24);
+        }
+        ui_add_pixel_corners(s_ui.settings_debug_items[index], colors[index]);
+    }
+    ui_refresh_debug_selection();
 }
 
 static lv_obj_t *ui_create_diagnostic_value(lv_obj_t *panel, const char *heading)
@@ -1978,6 +2676,8 @@ static void ui_load_page(ui_page_t page)
         s_play_voice_generation = UINT32_MAX;
         s_play_topology_revision = 0;
         s_play_action_selection = 0;
+        s_play_invalid_link_prompt_active = false;
+        s_play_last_prompt_us = 0;
     } else if (s_page == UI_PAGE_SUCCESS && page == UI_PAGE_PLAY) {
         game_judge_reset();
         s_play_judge_version = UINT32_MAX;
@@ -1987,7 +2687,8 @@ static void ui_load_page(ui_page_t page)
         play_mode_set_active(false);
         board_snapshot_reset(false);
     }
-    if ((s_page == UI_PAGE_DIAGNOSTICS || s_page == UI_PAGE_SETTINGS) && page != s_page) {
+    if ((s_page == UI_PAGE_DIAGNOSTICS || s_page == UI_PAGE_SETTINGS ||
+         s_page == UI_PAGE_SETTINGS_DEBUG) && page != s_page) {
         audio_self_test_set_tone_enabled(false);
     }
     if (page == UI_PAGE_CAMPAIGN) {
@@ -1998,6 +2699,16 @@ static void ui_load_page(ui_page_t page)
         ui_refresh_play();
     } else if (page == UI_PAGE_SUCCESS) {
         ui_refresh_success();
+    } else if (page == UI_PAGE_SETTINGS) {
+        ui_refresh_settings_selection();
+    } else if (page == UI_PAGE_SETTINGS_VOLUME) {
+        ui_refresh_volume_settings();
+    } else if (page == UI_PAGE_SETTINGS_WIFI) {
+        ui_refresh_wifi_selection();
+    } else if (page == UI_PAGE_SETTINGS_WIFI_PASSWORD) {
+        ui_refresh_wifi_password();
+    } else if (page == UI_PAGE_SETTINGS_DEBUG) {
+        ui_refresh_debug_selection();
     }
     s_page = page;
     lv_screen_load(s_ui.screen[page]);
@@ -2272,6 +2983,10 @@ esp_err_t app_ui_init(void)
     ui_create_play_screen();
     ui_create_success_screen();
     ui_create_settings_screen();
+    ui_create_settings_volume_screen();
+    ui_create_settings_wifi_screen();
+    ui_create_settings_wifi_password_screen();
+    ui_create_settings_debug_screen();
     ui_create_diagnostics_screen();
     ESP_RETURN_ON_ERROR(ui_shooter_lifecycle_self_test(), TAG,
                         "validate dynamic shooter screen lifecycle");
@@ -2283,7 +2998,7 @@ esp_err_t app_ui_init(void)
     lv_mem_monitor(&memory);
 
     esp_lv_adapter_unlock();
-    ESP_LOGI(TAG, "sci-fi UI ready: %u campaign nodes, seven persistent screens; "
+    ESP_LOGI(TAG, "sci-fi UI ready: %u campaign nodes, ten persistent screens; "
              "LVGL memory=%u%% free=%u largest=%u frag=%u%%",
              s_node_count, memory.used_pct, (unsigned)memory.free_size,
              (unsigned)memory.free_biggest_size, memory.frag_pct);
@@ -2315,6 +3030,7 @@ esp_err_t app_ui_update(const key_input_state_t *keys,
         s_previous_joystick = *joystick;
         s_input_initialized = true;
     } else {
+        const bool key0_edge = ui_pressed_edge(keys->key0_pressed, s_previous_keys.key0_pressed);
         const bool key1_edge = ui_pressed_edge(keys->key1_pressed, s_previous_keys.key1_pressed);
         const bool key3_edge = ui_pressed_edge(keys->key3_pressed, s_previous_keys.key3_pressed);
         const bool up_edge = ui_pressed_edge(joystick->up_pressed, s_previous_joystick.up_pressed);
@@ -2344,68 +3060,127 @@ esp_err_t app_ui_update(const key_input_state_t *keys,
                 memcmp(&progress_status, &s_last_progress_sync_status, sizeof(progress_status)) != 0) {
                 ui_refresh_settings_selection();
             }
+            if (left_edge) ui_move_settings_selection(-1, 0);
+            if (right_edge) ui_move_settings_selection(1, 0);
+            if (up_edge) ui_move_settings_selection(0, -1);
+            if (down_edge) ui_move_settings_selection(0, 1);
+            if (key1_edge) ui_activate_settings_selection();
+        } else if (!programmer_owns_input && s_page == UI_PAGE_SETTINGS_VOLUME) {
+            if (left_edge) ui_adjust_settings_volume(-5);
+            if (right_edge) ui_adjust_settings_volume(5);
+            if (key1_edge && audio_self_test_get_master_volume() != 70U) {
+                audio_self_test_set_master_volume(70U);
+                audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+                ui_refresh_volume_settings();
+            }
+        } else if (!programmer_owns_input && s_page == UI_PAGE_SETTINGS_WIFI) {
+            ui_refresh_wifi_selection();
+            const uint8_t count = s_settings_wifi_scan_mode ? s_settings_wifi_count :
+                                  (uint8_t)(UI_WIFI_PRESET_COUNT + 1U);
             if (up_edge || down_edge) {
-                if (up_edge) {
-                    s_settings_selection = s_settings_selection == 0U ?
-                        UI_SETTINGS_COUNT - 1U : s_settings_selection - 1U;
+                if (count == 0U) {
+                    s_settings_wifi_selection = 0U;
+                } else if (up_edge) {
+                    s_settings_wifi_selection = s_settings_wifi_selection == 0U ?
+                        count - 1U : s_settings_wifi_selection - 1U;
                 } else {
-                    s_settings_selection = (s_settings_selection + 1U) % UI_SETTINGS_COUNT;
+                    s_settings_wifi_selection =
+                        (s_settings_wifi_selection + 1U) % count;
                 }
                 audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
-                ui_refresh_settings_selection();
+                ui_refresh_wifi_selection();
             }
-            if (key1_edge && s_settings_selection != UI_SETTINGS_SPEAKER_TEST) {
-                if (s_settings_selection == UI_SETTINGS_PROGRESS_SYNC) {
-                    const esp_err_t err = progress_sync_request(
-                        ui_nodes(), s_node_count, s_completed_nodes);
-                    audio_self_test_play_effect(err == ESP_OK ? AUDIO_EFFECT_CONFIRM : AUDIO_EFFECT_ERROR);
-                    ui_refresh_settings_selection();
-                } else if (s_settings_selection == UI_SETTINGS_UNLOCK_ALL) {
-                    if (!s_unlock_all_nodes) {
-                        s_unlock_all_nodes = true;
-                        audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
-                        ui_refresh_settings_selection();
-                        ui_refresh_campaign();
-                        ui_refresh_detail();
-                        ESP_LOGI(TAG, "all campaign nodes unlocked for this boot");
-                    }
-                } else if (s_settings_selection == UI_SETTINGS_ASSISTANT_MODE) {
-                    const assistant_mode_t next = assistant_mode_get() == ASSISTANT_MODE_LOCAL ?
-                        ASSISTANT_MODE_REMOTE : ASSISTANT_MODE_LOCAL;
-                    const esp_err_t err = assistant_mode_set(next);
-                    if (err == ESP_OK) {
-                        assistant_router_handle_mode_change();
-                        audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
-                    } else {
-                        audio_self_test_play_effect(AUDIO_EFFECT_ERROR);
-                    }
-                    ui_refresh_settings_selection();
+            if (left_edge && s_settings_wifi_scan_mode) {
+                s_settings_wifi_scan_mode = false;
+                s_settings_wifi_selection = 0U;
+                s_settings_wifi_window = 0U;
+                ui_refresh_wifi_selection();
+            }
+            if (key1_edge) ui_activate_wifi_selection();
+        } else if (!programmer_owns_input && s_page == UI_PAGE_SETTINGS_WIFI_PASSWORD) {
+            bool refresh_password = false;
+            if (left_edge) {
+                if (s_settings_wifi_keyboard_selection < UI_WIFI_KEY_COUNT) {
+                    s_settings_wifi_keyboard_selection = s_settings_wifi_keyboard_selection % 10U == 0U ?
+                        s_settings_wifi_keyboard_selection + 9U : s_settings_wifi_keyboard_selection - 1U;
+                } else if (s_settings_wifi_keyboard_selection == UI_WIFI_PASSWORD_DELETE_CONTROL) {
+                    s_settings_wifi_keyboard_selection = UI_WIFI_PASSWORD_MODE_CONTROL;
+                } else if (s_settings_wifi_keyboard_selection == UI_WIFI_PASSWORD_CONNECT_CONTROL) {
+                    s_settings_wifi_keyboard_selection = UI_WIFI_PASSWORD_DELETE_CONTROL;
                 } else {
-                    const esp_err_t err = campaign_progress_clear();
-                    s_initialize_error = err != ESP_OK;
-                    if (err == ESP_OK) {
-                        memset(s_completed_nodes, 0, sizeof(s_completed_nodes));
-                        s_unlock_all_nodes = false;
-                        const campaign_content_meta_t meta = campaign_content_meta();
-                        const campaign_node_t *nodes = ui_nodes();
-                        s_selected_node = 0U;
-                        for (uint16_t index = 0U; index < s_node_count; ++index) {
-                            if (nodes[index].id == meta.initial_level_id) {
-                                s_selected_node = index;
-                                break;
-                            }
-                        }
-                        audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
-                        ui_refresh_settings_selection();
-                        ui_refresh_campaign();
-                        ui_refresh_detail();
-                        ESP_LOGI(TAG, "campaign progress initialized from settings");
-                    } else {
-                        audio_self_test_play_effect(AUDIO_EFFECT_ERROR);
-                        ui_refresh_settings_selection();
-                    }
+                    s_settings_wifi_keyboard_mode = (s_settings_wifi_keyboard_mode + 2U) % 3U;
+                }
+                refresh_password = true;
+            }
+            if (right_edge) {
+                if (s_settings_wifi_keyboard_selection < UI_WIFI_KEY_COUNT) {
+                    s_settings_wifi_keyboard_selection = s_settings_wifi_keyboard_selection % 10U == 9U ?
+                        s_settings_wifi_keyboard_selection - 9U : s_settings_wifi_keyboard_selection + 1U;
+                } else if (s_settings_wifi_keyboard_selection == UI_WIFI_PASSWORD_MODE_CONTROL) {
+                    s_settings_wifi_keyboard_mode = (s_settings_wifi_keyboard_mode + 1U) % 3U;
+                } else if (s_settings_wifi_keyboard_selection == UI_WIFI_PASSWORD_DELETE_CONTROL) {
+                    s_settings_wifi_keyboard_selection = UI_WIFI_PASSWORD_CONNECT_CONTROL;
+                } else {
+                    s_settings_wifi_keyboard_selection = UI_WIFI_PASSWORD_MODE_CONTROL;
+                }
+                refresh_password = true;
+            }
+            if (up_edge) {
+                if (s_settings_wifi_keyboard_selection < 10U) {
+                    s_settings_wifi_keyboard_selection = UI_WIFI_PASSWORD_MODE_CONTROL;
+                } else if (s_settings_wifi_keyboard_selection < UI_WIFI_KEY_COUNT) {
+                    s_settings_wifi_keyboard_selection -= 10U;
+                } else {
+                    s_settings_wifi_keyboard_selection = 30U;
+                }
+                refresh_password = true;
+            }
+            if (down_edge) {
+                if (s_settings_wifi_keyboard_selection < 30U) {
+                    s_settings_wifi_keyboard_selection += 10U;
+                    refresh_password = true;
+                } else if (s_settings_wifi_keyboard_selection < UI_WIFI_KEY_COUNT) {
+                    s_settings_wifi_keyboard_selection = UI_WIFI_PASSWORD_CONNECT_CONTROL;
+                    refresh_password = true;
+                } else if (s_settings_wifi_keyboard_selection == UI_WIFI_PASSWORD_MODE_CONTROL) {
+                    s_settings_wifi_keyboard_selection = 0U;
+                    refresh_password = true;
+                } else {
+                    s_settings_wifi_keyboard_selection = 30U;
+                    refresh_password = true;
                 }
             }
+            if (refresh_password) {
+                audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+                ui_refresh_wifi_password();
+            }
+            if (key0_edge) ui_wifi_password_delete();
+            if (key1_edge) {
+                if (s_settings_wifi_keyboard_selection < UI_WIFI_KEY_COUNT) {
+                    ui_wifi_password_insert(s_settings_wifi_keyboard_selection);
+                } else if (s_settings_wifi_keyboard_selection == UI_WIFI_PASSWORD_MODE_CONTROL) {
+                    s_settings_wifi_keyboard_mode = (s_settings_wifi_keyboard_mode + 1U) % 3U;
+                    audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+                    ui_refresh_wifi_password();
+                } else if (s_settings_wifi_keyboard_selection == UI_WIFI_PASSWORD_DELETE_CONTROL) {
+                    ui_wifi_password_delete();
+                } else {
+                    ui_wifi_password_submit();
+                }
+            }
+        } else if (!programmer_owns_input && s_page == UI_PAGE_SETTINGS_DEBUG) {
+            if (up_edge || down_edge) {
+                if (up_edge) {
+                    s_settings_debug_selection = s_settings_debug_selection == 0U ?
+                        UI_DEBUG_SETTINGS_COUNT - 1U : s_settings_debug_selection - 1U;
+                } else {
+                    s_settings_debug_selection =
+                        (s_settings_debug_selection + 1U) % UI_DEBUG_SETTINGS_COUNT;
+                }
+                audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+                ui_refresh_debug_selection();
+            }
+            if (key1_edge) ui_activate_debug_selection();
         } else if (!programmer_owns_input && s_page == UI_PAGE_CAMPAIGN) {
             if (up_edge) ui_select_nearest_node(0, -1);
             if (down_edge) ui_select_nearest_node(0, 1);
@@ -2434,8 +3209,8 @@ esp_err_t app_ui_update(const key_input_state_t *keys,
         }
     }
 
-    const bool settings_tone = s_page == UI_PAGE_SETTINGS &&
-                               s_settings_selection == UI_SETTINGS_SPEAKER_TEST &&
+    const bool settings_tone = s_page == UI_PAGE_SETTINGS_DEBUG &&
+                               s_settings_debug_selection == UI_DEBUG_SPEAKER_TEST &&
                                keys->key1_pressed;
     if (s_page == UI_PAGE_DIAGNOSTICS) {
         audio_self_test_set_tone_enabled(keys->key0_pressed);

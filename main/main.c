@@ -413,12 +413,21 @@ static void ws2812_connection_task(void *arg)
 static void input_scan_task(void *arg)
 {
     (void)arg;
+    bool key0_initialized = false;
+    bool last_key0_pressed = false;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        const uint8_t input_byte = baseboard_ir_get_latest_input_byte();
         input_state_t state = {
-            .keys = key_input_update(baseboard_ir_get_latest_input_byte()),
+            .keys = key_input_update(input_byte),
             .joystick = joystick_input_read(),
         };
+        if (!key0_initialized || state.keys.key0_pressed != last_key0_pressed) {
+            ESP_LOGI(TAG, "Key0 (right button) %s, input=0x%02X",
+                     state.keys.key0_pressed ? "pressed" : "released", input_byte);
+            last_key0_pressed = state.keys.key0_pressed;
+            key0_initialized = true;
+        }
         const uint8_t switch_mask = (state.keys.sw1_on ? 1U : 0U) |
                                     (state.keys.sw2_on ? 2U : 0U) |
                                     (state.keys.sw3_on ? 4U : 0U) |
@@ -484,6 +493,7 @@ void app_main(void)
     ESP_ERROR_CHECK(assistant_router_self_test_run());
     tuco_agent_serial_start();
     ESP_ERROR_CHECK(voice_assistant_init());
+    ESP_ERROR_CHECK(voice_assistant_gameplay_prompt_self_test_run());
     ESP_ERROR_CHECK(block_i2c_init());
 
     s_input_state_queue = xQueueCreate(1, sizeof(input_state_t));

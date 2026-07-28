@@ -2,7 +2,7 @@ dependencies:
   claw_utils:
     dependencies: []
     source:
-      path: E:\emb_agent_new\components\claw_utils
+      path: /home/sk21/Code/Esp32/TuCo_project/7.13-/components/claw_utils
       type: local
     version: '*'
   espressif/button:
@@ -536,7 +536,7 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.4
+    version: 5.5.3
   lvgl/lvgl:
     component_hash: 17e68bfd21f0edf4c3ee838e2273da840bf3930e5dbc3bfa6c1190c3aed41f9f
     dependencies: []

@@ -1,18 +1,37 @@
 menu "TuCo C6 network test"
 
-config TUCO_C6_WIFI_SSID
-    string "Wi-Fi SSID used by the C6 test"
+config TUCO_C6_WIFI_PRESET_1_SSID
+    string "Preset Wi-Fi 1 SSID"
     default ""
     help
         Leave empty to run scan-only mode. Set this and the password to
         connect the board's on-board ESP32-C6 to a Wi-Fi access point.
 
-config TUCO_C6_WIFI_PASSWORD
-    string "Wi-Fi password used by the C6 test"
+config TUCO_C6_WIFI_PRESET_1_PASSWORD
+    string "Preset Wi-Fi 1 password"
     default ""
     help
-        Password for the SSID above. It is kept in sdkconfig and can be
-        cleared after the hardware test.
+        Keep this value only in the local sdkconfig.
+
+config TUCO_C6_WIFI_PRESET_2_SSID
+    string "Preset Wi-Fi 2 SSID"
+    default ""
+
+config TUCO_C6_WIFI_PRESET_2_PASSWORD
+    string "Preset Wi-Fi 2 password"
+    default ""
+    help
+        Keep this value only in the local sdkconfig.
+
+config TUCO_C6_WIFI_PRESET_3_SSID
+    string "Preset Wi-Fi 3 SSID"
+    default ""
+
+config TUCO_C6_WIFI_PRESET_3_PASSWORD
+    string "Preset Wi-Fi 3 password"
+    default ""
+    help
+        Keep this value only in the local sdkconfig.
 
 endmenu
 

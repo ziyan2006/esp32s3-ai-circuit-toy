@@ -32,7 +32,12 @@ static const char *TAG = "voice_assistant";
 
 typedef enum { CLOUD_NONE, CLOUD_ASR, CLOUD_TTS } cloud_mode_t;
 typedef enum { VOICE_READY, VOICE_RECORDING, VOICE_ASR, VOICE_AGENT, VOICE_TTS, VOICE_WAIT_AGENT, VOICE_ERROR } voice_phase_t;
-typedef enum { TTS_KIND_NONE, TTS_KIND_THINKING_ANNOUNCEMENT, TTS_KIND_AGENT_REPLY } tts_kind_t;
+typedef enum {
+    TTS_KIND_NONE,
+    TTS_KIND_THINKING_ANNOUNCEMENT,
+    TTS_KIND_AGENT_REPLY,
+    TTS_KIND_GAMEPLAY_PROMPT,
+} tts_kind_t;
 
 static esp_websocket_client_handle_t s_client;
 static TaskHandle_t s_task;
@@ -49,7 +54,7 @@ static volatile uint16_t s_level_id;
 static bool s_session_play_active;
 static uint16_t s_session_level_id;
 static cloud_mode_t s_mode;
-static voice_phase_t s_phase;
+static volatile voice_phase_t s_phase;
 static bool s_connected;
 static bool s_final_sent;
 static bool s_tts_started;
@@ -78,6 +83,8 @@ static tts_kind_t s_tts_kind;
 static size_t s_tts_text_offset;
 static char s_request_id[37];
 static char s_error_reason[48];
+static volatile bool s_gameplay_prompt_pending;
+static voice_gameplay_prompt_t s_pending_gameplay_prompt;
 
 static void status_set(voice_assistant_state_t state, bool visible, bool error, const char *text);
 
@@ -124,15 +131,33 @@ static void status_set(voice_assistant_state_t state, bool visible, bool error, 
     portEXIT_CRITICAL(&s_lock);
 }
 
-static bool configured(void)
+static bool tts_configured(void)
 {
 #if CONFIG_TUCO_VOLCENGINE_ENABLED
-    const bool assistant_configured = assistant_mode_get() == ASSISTANT_MODE_REMOTE ?
-        remote_assistant_is_configured() : tuco_agent_is_configured();
-    return CONFIG_TUCO_VOLCENGINE_API_KEY[0] != '\0' && assistant_configured;
+    return CONFIG_TUCO_VOLCENGINE_API_KEY[0] != '\0';
 #else
     return false;
 #endif
+}
+
+static bool manual_voice_configured(void)
+{
+    if (!tts_configured()) return false;
+    return assistant_mode_get() == ASSISTANT_MODE_REMOTE ?
+        remote_assistant_is_configured() : tuco_agent_is_configured();
+}
+
+static const char *gameplay_prompt_text(voice_gameplay_prompt_t prompt)
+{
+    static const char *const prompts[VOICE_GAMEPLAY_PROMPT_COUNT] = {
+        [VOICE_GAMEPLAY_PROMPT_INVALID_LINK] = "这根线没有接对，请重新检查。",
+        [VOICE_GAMEPLAY_PROMPT_WRONG_BLOCK_COUNT] = "输入或输出积木的数量不对，看看题目要求。",
+        [VOICE_GAMEPLAY_PROMPT_INCOMPLETE_CIRCUIT] = "电路还没有完整接通，请检查每个输出的连线。",
+        [VOICE_GAMEPLAY_PROMPT_CHECK_FAILED] = "答案还不对，观察红色结果，再调整电路。",
+        [VOICE_GAMEPLAY_PROMPT_CHECK_CANCELLED] = "电路变动了，请重新启动检查。",
+        [VOICE_GAMEPLAY_PROMPT_CHECK_PASSED] = "太棒了，检查全部通过，飞船可以出发啦！",
+    };
+    return prompt < VOICE_GAMEPLAY_PROMPT_COUNT ? prompts[prompt] : NULL;
 }
 
 static void uuid(char out[37])
@@ -353,6 +378,12 @@ static void report_error(const char *text)
     audio_self_test_voice_capture_end();
     audio_self_test_voice_playback_abort();
     clear_client();
+    if (s_tts_kind == TTS_KIND_GAMEPLAY_PROMPT) {
+        s_tts_kind = TTS_KIND_NONE;
+        s_phase = VOICE_READY;
+        status_set(VOICE_ASSISTANT_READY, false, false, "");
+        return;
+    }
     s_phase = VOICE_ERROR;
     status_set(VOICE_ASSISTANT_ERROR, true, true, "失败");
 }
@@ -582,28 +613,44 @@ static void voice_task(void *arg)
     uint8_t *pcm = malloc(AUDIO_CHUNK_BYTES);
     if (pcm == NULL) { s_task = NULL; vTaskDelete(NULL); return; }
     for (;;) {
-        if (!configured()) { status_set(VOICE_ASSISTANT_DISABLED, false, false, ""); vTaskDelay(pdMS_TO_TICKS(250)); continue; }
+        if (!tts_configured()) {
+            s_gameplay_prompt_pending = false;
+            status_set(VOICE_ASSISTANT_DISABLED, false, false, "");
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
         if (!s_play_active) {
             cancel_pending_agent();
+            s_gameplay_prompt_pending = false;
             if (s_phase != VOICE_READY) {
                 audio_self_test_voice_capture_end();
                 audio_self_test_voice_playback_abort();
                 clear_client();
                 s_phase = VOICE_READY;
+                status_set(VOICE_ASSISTANT_READY, false, false, "");
             }
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
         if (!c6_network_is_connected()) {
+            s_gameplay_prompt_pending = false;
+            const bool gameplay_prompt_active = s_tts_kind == TTS_KIND_GAMEPLAY_PROMPT;
             if (s_phase != VOICE_READY) {
                 cancel_pending_agent();
                 audio_self_test_voice_capture_end(); audio_self_test_voice_playback_abort(); clear_client(); s_phase = VOICE_ERROR;
             }
-            if (s_play_active && s_key_pressed) status_set(VOICE_ASSISTANT_ERROR, true, true, "失败");
+            if (gameplay_prompt_active) {
+                s_tts_kind = TTS_KIND_NONE;
+                s_phase = VOICE_READY;
+                status_set(VOICE_ASSISTANT_READY, false, false, "");
+            } else if (s_play_active && s_key_pressed && manual_voice_configured()) {
+                status_set(VOICE_ASSISTANT_ERROR, true, true, "失败");
+            }
             vTaskDelay(pdMS_TO_TICKS(100)); continue;
         }
         if (s_phase == VOICE_ERROR && !s_key_pressed) { s_phase = VOICE_READY; status_set(VOICE_ASSISTANT_READY, false, false, ""); }
-        const bool request_recording = s_play_active && !s_programmer_owns_input && s_key_pressed;
+        const bool request_recording = s_play_active && !s_programmer_owns_input && s_key_pressed &&
+                                       manual_voice_configured();
         if (s_transport_error) {
             const char *reason = s_error_reason[0] == '\0' ? "云端连接失败" : s_error_reason;
             s_transport_error = false;
@@ -623,6 +670,16 @@ static void voice_task(void *arg)
                 s_phase = VOICE_RECORDING;
                 s_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(MAX_RECORDING_MS);
                 status_set(VOICE_ASSISTANT_RECORDING, true, false, "录音中");
+            }
+        }
+        if (!request_recording && s_phase == VOICE_READY && s_gameplay_prompt_pending) {
+            const voice_gameplay_prompt_t prompt = s_pending_gameplay_prompt;
+            s_gameplay_prompt_pending = false;
+            const char *text = gameplay_prompt_text(prompt);
+            if (text != NULL) {
+                start_tts_text(text, TTS_KIND_GAMEPLAY_PROMPT);
+                status_set(VOICE_ASSISTANT_PLAYING, true, false, text);
+                ESP_LOGI(TAG, "gameplay prompt=%u", (unsigned)prompt);
             }
         }
         if (s_phase == VOICE_RECORDING && !s_connected && xTaskGetTickCount() >= s_deadline) {
@@ -732,8 +789,8 @@ esp_err_t voice_assistant_init(void)
     memset(&s_status, 0, sizeof(s_status)); s_status.state = VOICE_ASSISTANT_DISABLED;
     s_phase = VOICE_READY; s_event_sem = xSemaphoreCreateBinary();
     if (s_event_sem == NULL) return ESP_ERR_NO_MEM;
-    if (!configured()) {
-        ESP_LOGW(TAG, "voice disabled; configure Volcengine voice key and selected assistant backend");
+    if (!tts_configured()) {
+        ESP_LOGW(TAG, "voice disabled; configure Volcengine TTS API key");
     }
     if (xTaskCreate(voice_task, "voice_cloud", 10240, NULL, 4, &s_task) != pdPASS) return ESP_ERR_NO_MEM;
     return ESP_OK;
@@ -755,9 +812,39 @@ void voice_assistant_update(bool play_active, bool programmer_owns_input, bool k
         assistant_router_end_level_session();
         s_session_play_active = false;
     }
-    if (play_active && !programmer_owns_input && s_phase == VOICE_READY && configured()) {
+    if (play_active && !programmer_owns_input && s_phase == VOICE_READY && manual_voice_configured()) {
         status_set(VOICE_ASSISTANT_READY, true, false, "可说话");
     }
+}
+
+esp_err_t voice_assistant_request_gameplay_prompt(voice_gameplay_prompt_t prompt)
+{
+    if (gameplay_prompt_text(prompt) == NULL) return ESP_ERR_INVALID_ARG;
+    if (!tts_configured() || !c6_network_is_connected()) return ESP_ERR_INVALID_STATE;
+
+    bool accepted = false;
+    portENTER_CRITICAL(&s_lock);
+    if (s_play_active && !s_programmer_owns_input && !s_key_pressed &&
+        s_phase == VOICE_READY && !s_gameplay_prompt_pending) {
+        s_pending_gameplay_prompt = prompt;
+        s_gameplay_prompt_pending = true;
+        accepted = true;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return accepted ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t voice_assistant_gameplay_prompt_self_test_run(void)
+{
+    for (uint8_t prompt = 0U; prompt < VOICE_GAMEPLAY_PROMPT_COUNT; ++prompt) {
+        if (gameplay_prompt_text((voice_gameplay_prompt_t)prompt) == NULL ||
+            gameplay_prompt_text((voice_gameplay_prompt_t)prompt)[0] == '\0') {
+            return ESP_FAIL;
+        }
+    }
+    if (gameplay_prompt_text(VOICE_GAMEPLAY_PROMPT_COUNT) != NULL) return ESP_FAIL;
+    ESP_LOGI(TAG, "gameplay prompt mapping self-test passed");
+    return ESP_OK;
 }
 
 void voice_assistant_get_status(voice_assistant_status_t *status)
