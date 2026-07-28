@@ -9,7 +9,7 @@ idf_component_register(
          "${SHOOTER_SRC_DIR}/shooter_stage.c"
          "${SHOOTER_SRC_DIR}/shooter_wave.c"
     INCLUDE_DIRS "." "${SHOOTER_SRC_DIR}"
-    REQUIRES driver esp_hw_support esp_timer esp_event esp_netif esp_wifi nvs_flash json mbedtls esp_http_client lvgl espressif__esp_lvgl_adapter espressif__esp32_p4_function_ev_board_noglib espressif__esp_codec_dev espressif__esp_wifi_remote espressif__esp_hosted espressif__esp_websocket_client espressif__zlib claw_core
+    REQUIRES driver esp_hw_support esp_timer esp_event esp_netif esp_wifi nvs_flash esp_partition json mbedtls esp_http_client lvgl espressif__esp_lvgl_adapter espressif__esp32_p4_function_ev_board_noglib espressif__esp_codec_dev espressif__esp_wifi_remote espressif__esp_hosted espressif__esp_websocket_client espressif__zlib claw_core
     EMBED_FILES
         "assets/shooter/player_ship.bin"
         "assets/shooter/enemy_ship.bin"

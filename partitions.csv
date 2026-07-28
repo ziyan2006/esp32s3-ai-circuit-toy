@@ -1,5 +1,6 @@
 # Name,     Type, SubType, Offset,   Size,     Flags
-# Use the complete 16 MiB flash after the boot data for the factory application.
+# Reserve the final 128 KiB for the one-time cached voice thinking prompt.
 nvs,        data, nvs,     0x9000,   0x6000,
 phy_init,   data, phy,     0xf000,   0x1000,
-factory,    app,  factory, 0x10000,  0xff0000,
+factory,    app,  factory, 0x10000,  0xfd0000,
+thinking_cache,data,0x40,  0xfe0000, 0x020000,

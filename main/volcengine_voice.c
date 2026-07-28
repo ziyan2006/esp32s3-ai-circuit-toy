@@ -10,6 +10,7 @@
 #include "c6_network_test.h"
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
+#include "esp_partition.h"
 #include "esp_random.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
@@ -29,6 +30,13 @@ static const char *TAG = "voice_assistant";
 #define REQUEST_TIMEOUT_MS 30000U
 #define UNCLEAR_REPLY "我没明白，换个说法试试。"
 #define THINKING_ANNOUNCEMENT "稍等，我思考一下"
+#define THINKING_CACHE_PARTITION_LABEL "thinking_cache"
+#define THINKING_CACHE_MAGIC 0x54484B31U
+#define THINKING_CACHE_VERSION 1U
+#define THINKING_CACHE_HEADER_BYTES 16U
+#define THINKING_CACHE_MIN_BYTES MIN_AUDIO_BYTES
+#define THINKING_CACHE_CHECKSUM_SEED 2166136261U
+#define THINKING_CACHE_CHECKSUM_PRIME 16777619U
 
 typedef enum { CLOUD_NONE, CLOUD_ASR, CLOUD_TTS } cloud_mode_t;
 typedef enum { VOICE_READY, VOICE_RECORDING, VOICE_ASR, VOICE_AGENT, VOICE_TTS, VOICE_WAIT_AGENT, VOICE_ERROR } voice_phase_t;
@@ -38,6 +46,13 @@ typedef enum {
     TTS_KIND_AGENT_REPLY,
     TTS_KIND_GAMEPLAY_PROMPT,
 } tts_kind_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t length;
+    uint32_t checksum;
+} thinking_cache_header_t;
 
 static esp_websocket_client_handle_t s_client;
 static TaskHandle_t s_task;
@@ -57,6 +72,7 @@ static cloud_mode_t s_mode;
 static volatile voice_phase_t s_phase;
 static bool s_connected;
 static bool s_final_sent;
+static bool s_capture_ended;
 static bool s_tts_started;
 static bool s_tts_audio_received;
 static bool s_tts_finished;
@@ -85,8 +101,168 @@ static char s_request_id[37];
 static char s_error_reason[48];
 static volatile bool s_gameplay_prompt_pending;
 static voice_gameplay_prompt_t s_pending_gameplay_prompt;
+static const esp_partition_t *s_thinking_cache_partition;
+static bool s_thinking_cache_available;
+static bool s_thinking_cache_capturing;
+static uint32_t s_thinking_cache_length;
+static uint32_t s_thinking_cache_checksum;
+static bool s_cached_thinking_playback;
+static uint32_t s_cached_thinking_offset;
 
 static void status_set(voice_assistant_state_t state, bool visible, bool error, const char *text);
+
+static uint32_t thinking_cache_checksum_update(uint32_t checksum, const uint8_t *data, size_t length)
+{
+    for (size_t index = 0U; index < length; ++index) {
+        checksum ^= data[index];
+        checksum *= THINKING_CACHE_CHECKSUM_PRIME;
+    }
+    return checksum;
+}
+
+static void thinking_cache_load(void)
+{
+    s_thinking_cache_partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, THINKING_CACHE_PARTITION_LABEL);
+    s_thinking_cache_available = false;
+    s_thinking_cache_capturing = false;
+    s_thinking_cache_length = 0U;
+    if (s_thinking_cache_partition == NULL ||
+        s_thinking_cache_partition->size <= sizeof(thinking_cache_header_t)) {
+        ESP_LOGW(TAG, "thinking prompt cache partition unavailable");
+        return;
+    }
+
+    thinking_cache_header_t header = {0};
+    if (esp_partition_read(s_thinking_cache_partition, 0U, &header, sizeof(header)) != ESP_OK ||
+        header.magic != THINKING_CACHE_MAGIC || header.version != THINKING_CACHE_VERSION ||
+        header.length < THINKING_CACHE_MIN_BYTES ||
+        header.length > s_thinking_cache_partition->size - sizeof(header)) {
+        return;
+    }
+
+    uint8_t buffer[512];
+    uint32_t checksum = THINKING_CACHE_CHECKSUM_SEED;
+    size_t offset = 0U;
+    while (offset < header.length) {
+        const size_t remaining = header.length - offset;
+        const size_t chunk_size = remaining > sizeof(buffer) ? sizeof(buffer) : remaining;
+        if (esp_partition_read(s_thinking_cache_partition, sizeof(header) + offset,
+                               buffer, chunk_size) != ESP_OK) {
+            ESP_LOGW(TAG, "thinking prompt cache read failed");
+            return;
+        }
+        checksum = thinking_cache_checksum_update(checksum, buffer, chunk_size);
+        offset += chunk_size;
+    }
+    if (checksum != header.checksum) {
+        ESP_LOGW(TAG, "thinking prompt cache checksum mismatch");
+        return;
+    }
+
+    s_thinking_cache_length = header.length;
+    s_thinking_cache_available = true;
+    ESP_LOGI(TAG, "thinking prompt cache ready: %lu bytes",
+             (unsigned long)s_thinking_cache_length);
+}
+
+static void thinking_cache_begin_capture(void)
+{
+    s_thinking_cache_capturing = false;
+    s_thinking_cache_available = false;
+    s_thinking_cache_length = 0U;
+    if (s_thinking_cache_partition == NULL) return;
+    if (esp_partition_erase_range(s_thinking_cache_partition, 0U,
+                                  s_thinking_cache_partition->size) != ESP_OK) {
+        ESP_LOGW(TAG, "thinking prompt cache erase failed");
+        return;
+    }
+    s_thinking_cache_checksum = THINKING_CACHE_CHECKSUM_SEED;
+    s_thinking_cache_capturing = true;
+    ESP_LOGI(TAG, "capturing cloud thinking prompt for local cache");
+}
+
+static void thinking_cache_append(const uint8_t *data, size_t length)
+{
+    if (!s_thinking_cache_capturing || data == NULL || length == 0U) return;
+    if (length > s_thinking_cache_partition->size - sizeof(thinking_cache_header_t) -
+                     s_thinking_cache_length) {
+        ESP_LOGW(TAG, "thinking prompt cache is full");
+        s_thinking_cache_capturing = false;
+        return;
+    }
+    if (esp_partition_write(s_thinking_cache_partition,
+                            sizeof(thinking_cache_header_t) + s_thinking_cache_length,
+                            data, length) != ESP_OK) {
+        ESP_LOGW(TAG, "thinking prompt cache write failed");
+        s_thinking_cache_capturing = false;
+        return;
+    }
+    s_thinking_cache_checksum = thinking_cache_checksum_update(
+        s_thinking_cache_checksum, data, length);
+    s_thinking_cache_length += (uint32_t)length;
+}
+
+static void thinking_cache_finish_capture(void)
+{
+    if (!s_thinking_cache_capturing) return;
+    s_thinking_cache_capturing = false;
+    if (s_thinking_cache_length < THINKING_CACHE_MIN_BYTES) return;
+
+    const thinking_cache_header_t header = {
+        .magic = THINKING_CACHE_MAGIC,
+        .version = THINKING_CACHE_VERSION,
+        .length = s_thinking_cache_length,
+        .checksum = s_thinking_cache_checksum,
+    };
+    if (esp_partition_write(s_thinking_cache_partition, 0U, &header, sizeof(header)) != ESP_OK) {
+        ESP_LOGW(TAG, "thinking prompt cache header write failed");
+        s_thinking_cache_length = 0U;
+        return;
+    }
+    s_thinking_cache_available = true;
+    ESP_LOGI(TAG, "thinking prompt cache saved: %lu bytes",
+             (unsigned long)s_thinking_cache_length);
+}
+
+static bool start_cached_thinking_announcement(void)
+{
+    if (!s_thinking_cache_available || s_thinking_cache_partition == NULL ||
+        audio_self_test_voice_playback_begin() != ESP_OK) {
+        return false;
+    }
+    s_tts_kind = TTS_KIND_THINKING_ANNOUNCEMENT;
+    s_cached_thinking_playback = true;
+    s_cached_thinking_offset = 0U;
+    s_playback_finishing = false;
+    s_phase = VOICE_TTS;
+    status_set(VOICE_ASSISTANT_PLAYING, true, false, "播放中");
+    ESP_LOGI(TAG, "playing local thinking prompt cache");
+    return true;
+}
+
+static esp_err_t service_cached_thinking_announcement(uint8_t *buffer, size_t capacity)
+{
+    if (!s_cached_thinking_playback) return ESP_OK;
+    if (buffer == NULL || capacity == 0U) return ESP_ERR_INVALID_ARG;
+    if (s_cached_thinking_offset < s_thinking_cache_length) {
+        const size_t remaining = s_thinking_cache_length - s_cached_thinking_offset;
+        const size_t chunk_size = remaining > capacity ? capacity : remaining;
+        esp_err_t err = esp_partition_read(s_thinking_cache_partition,
+                                           sizeof(thinking_cache_header_t) + s_cached_thinking_offset,
+                                           buffer, chunk_size);
+        if (err != ESP_OK) return err;
+        err = audio_self_test_voice_playback_push(buffer, chunk_size, pdMS_TO_TICKS(1000));
+        if (err != ESP_OK) return err;
+        s_cached_thinking_offset += (uint32_t)chunk_size;
+    }
+    if (s_cached_thinking_offset >= s_thinking_cache_length) {
+        audio_self_test_voice_playback_finish();
+        s_cached_thinking_playback = false;
+        s_playback_finishing = true;
+    }
+    return ESP_OK;
+}
 
 static void cancel_pending_agent(void)
 {
@@ -108,6 +284,8 @@ static void start_tts_text(const char *text, tts_kind_t kind)
     s_tts_finish_sent = false;
     s_playback_finishing = false;
     s_tts_text_offset = 0U;
+    s_cached_thinking_playback = false;
+    if (kind == TTS_KIND_THINKING_ANNOUNCEMENT) thinking_cache_begin_capture();
     s_phase = VOICE_TTS;
 }
 
@@ -377,6 +555,8 @@ static void report_error(const char *text)
     cancel_pending_agent();
     audio_self_test_voice_capture_end();
     audio_self_test_voice_playback_abort();
+    s_cached_thinking_playback = false;
+    s_thinking_cache_capturing = false;
     clear_client();
     if (s_tts_kind == TTS_KIND_GAMEPLAY_PROMPT) {
         s_tts_kind = TTS_KIND_NONE;
@@ -504,6 +684,9 @@ static void parse_tts_frame(const uint8_t *data, size_t len)
             if (audio_self_test_voice_playback_begin() != ESP_OK) { callback_error("播放缓冲失败"); return; }
             s_tts_started = true; status_set(VOICE_ASSISTANT_PLAYING, true, false, "播放中");
         }
+        if (s_tts_kind == TTS_KIND_THINKING_ANNOUNCEMENT) {
+            thinking_cache_append(data + offset, payload_len);
+        }
         if (audio_self_test_voice_playback_push(data + offset, payload_len, pdMS_TO_TICKS(1000)) != ESP_OK) {
             callback_error("播放缓冲失败"); return;
         }
@@ -521,6 +704,7 @@ static void parse_tts_frame(const uint8_t *data, size_t len)
         callback_error("TTS 服务错误");
     } else if (event == 152U || event == 359U) {
         if (!s_tts_audio_received) { callback_error("TTS 没有返回音频"); return; }
+        if (s_tts_kind == TTS_KIND_THINKING_ANNOUNCEMENT) thinking_cache_finish_capture();
         s_tts_finished = true;
     }
 }
@@ -625,6 +809,8 @@ static void voice_task(void *arg)
             if (s_phase != VOICE_READY) {
                 audio_self_test_voice_capture_end();
                 audio_self_test_voice_playback_abort();
+                s_cached_thinking_playback = false;
+                s_thinking_cache_capturing = false;
                 clear_client();
                 s_phase = VOICE_READY;
                 status_set(VOICE_ASSISTANT_READY, false, false, "");
@@ -637,7 +823,9 @@ static void voice_task(void *arg)
             const bool gameplay_prompt_active = s_tts_kind == TTS_KIND_GAMEPLAY_PROMPT;
             if (s_phase != VOICE_READY) {
                 cancel_pending_agent();
-                audio_self_test_voice_capture_end(); audio_self_test_voice_playback_abort(); clear_client(); s_phase = VOICE_ERROR;
+                audio_self_test_voice_capture_end(); audio_self_test_voice_playback_abort();
+                s_cached_thinking_playback = false; s_thinking_cache_capturing = false;
+                clear_client(); s_phase = VOICE_ERROR;
             }
             if (gameplay_prompt_active) {
                 s_tts_kind = TTS_KIND_NONE;
@@ -658,12 +846,14 @@ static void voice_task(void *arg)
         }
         if (request_recording && (s_phase == VOICE_TTS || s_phase == VOICE_AGENT || s_phase == VOICE_WAIT_AGENT)) {
             cancel_pending_agent();
-            audio_self_test_voice_playback_abort(); clear_client(); s_phase = VOICE_READY;
+            audio_self_test_voice_playback_abort();
+            s_cached_thinking_playback = false; s_thinking_cache_capturing = false;
+            clear_client(); s_phase = VOICE_READY;
             s_tts_started = false; s_tts_finished = false; s_playback_finishing = false;
         }
         if (request_recording && s_phase == VOICE_READY && s_consumed_press_id != s_press_id) {
             s_consumed_press_id = s_press_id; s_audio_bytes = 0; s_sequence = 2; s_final_text[0] = '\0';
-            s_final_sent = false; cancel_pending_agent(); s_tts_kind = TTS_KIND_NONE;
+            s_final_sent = false; s_capture_ended = false; cancel_pending_agent(); s_tts_kind = TTS_KIND_NONE;
             s_tts_text[0] = '\0'; s_agent_reply[0] = '\0';
             if (audio_self_test_voice_capture_begin() != ESP_OK || open_cloud(CLOUD_ASR) != ESP_OK) { report_error("语音连接失败"); }
             else {
@@ -682,17 +872,25 @@ static void voice_task(void *arg)
                 ESP_LOGI(TAG, "gameplay prompt=%u", (unsigned)prompt);
             }
         }
+        if (s_phase == VOICE_RECORDING && !s_capture_ended &&
+            (!request_recording || xTaskGetTickCount() >= s_deadline)) {
+            audio_self_test_voice_capture_end();
+            s_capture_ended = true;
+            status_set(VOICE_ASSISTANT_THINKING, true, false, "识别中");
+        }
         if (s_phase == VOICE_RECORDING && !s_connected && xTaskGetTickCount() >= s_deadline) {
             report_error("ASR 连接超时");
         }
         if (s_phase == VOICE_RECORDING && s_connected) {
-            const size_t got = read_capture(pcm, AUDIO_CHUNK_BYTES, pdMS_TO_TICKS(20));
-            if (got > 0U) {
-                if (send_asr_audio(pcm, got, false) != ESP_OK) report_error("语音上传失败");
-                else s_audio_bytes += (uint32_t)got;
+            if (!s_capture_ended) {
+                const size_t got = read_capture(pcm, AUDIO_CHUNK_BYTES, pdMS_TO_TICKS(20));
+                if (got > 0U) {
+                    if (send_asr_audio(pcm, got, false) != ESP_OK) report_error("语音上传失败");
+                    else s_audio_bytes += (uint32_t)got;
+                }
             }
-            if ((!request_recording || xTaskGetTickCount() >= s_deadline) && !s_final_sent) {
-                audio_self_test_voice_capture_end(); s_final_sent = true;
+            if (s_capture_ended && !s_final_sent) {
+                s_final_sent = true;
                 for (;;) {
                     const size_t tail = read_capture(pcm, AUDIO_CHUNK_BYTES, 0);
                     if (tail == 0U) break;
@@ -716,7 +914,9 @@ static void voice_task(void *arg)
                     s_agent_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(40000);
                     status_set(VOICE_ASSISTANT_THINKING, true, false, "思考中");
                     ESP_LOGI(TAG, "播放等待提示");
-                    start_tts_text(THINKING_ANNOUNCEMENT, TTS_KIND_THINKING_ANNOUNCEMENT);
+                    if (!start_cached_thinking_announcement()) {
+                        start_tts_text(THINKING_ANNOUNCEMENT, TTS_KIND_THINKING_ANNOUNCEMENT);
+                    }
                 }
             }
         }
@@ -725,8 +925,13 @@ static void voice_task(void *arg)
             if (agent_result == ESP_ERR_TIMEOUT) report_error("对话响应超时");
             else if (agent_result != ESP_OK) report_error("对话服务失败");
         }
-        if (s_phase == VOICE_TTS && s_mode == CLOUD_ASR) clear_client();
-        if (s_phase == VOICE_TTS && s_client == NULL && !s_playback_finishing) {
+        if (s_phase == VOICE_TTS && s_cached_thinking_playback &&
+            service_cached_thinking_announcement(pcm, AUDIO_CHUNK_BYTES) != ESP_OK) {
+            report_error("本地提示播放失败");
+        }
+        if (s_phase == VOICE_TTS && !s_cached_thinking_playback && s_mode == CLOUD_ASR) clear_client();
+        if (s_phase == VOICE_TTS && !s_cached_thinking_playback &&
+            s_client == NULL && !s_playback_finishing) {
             if (open_cloud(CLOUD_TTS) != ESP_OK) report_error("TTS 连接失败");
             else {
                 s_tts_started = false; s_tts_audio_received = false; s_tts_finished = false;
@@ -734,7 +939,8 @@ static void voice_task(void *arg)
                 s_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(REQUEST_TIMEOUT_MS);
             }
         }
-        if (s_phase == VOICE_TTS && s_tts_session_started && !s_tts_finish_sent &&
+        if (s_phase == VOICE_TTS && !s_cached_thinking_playback &&
+            s_tts_session_started && !s_tts_finish_sent &&
             xTaskGetTickCount() >= s_tts_next_request) {
             const char *next = s_tts_text + s_tts_text_offset;
             if (*next == '\0') {
@@ -749,7 +955,7 @@ static void voice_task(void *arg)
                 }
             }
         }
-        if (s_phase == VOICE_TTS && s_tts_finished) {
+        if (s_phase == VOICE_TTS && !s_cached_thinking_playback && s_tts_finished) {
             audio_self_test_voice_playback_finish();
             clear_client();
             s_tts_finished = false;
@@ -778,7 +984,8 @@ static void voice_task(void *arg)
             ESP_LOGI(TAG, "Agent 回复已就绪，播放回复");
             start_tts_text(s_agent_reply, TTS_KIND_AGENT_REPLY);
         }
-        if (s_phase == VOICE_TTS && !s_tts_finished && !s_playback_finishing &&
+        if (s_phase == VOICE_TTS && !s_cached_thinking_playback &&
+            !s_tts_finished && !s_playback_finishing &&
             xTaskGetTickCount() >= s_deadline) report_error("TTS 响应超时");
         vTaskDelay(pdMS_TO_TICKS(5));
     }
@@ -789,6 +996,7 @@ esp_err_t voice_assistant_init(void)
     memset(&s_status, 0, sizeof(s_status)); s_status.state = VOICE_ASSISTANT_DISABLED;
     s_phase = VOICE_READY; s_event_sem = xSemaphoreCreateBinary();
     if (s_event_sem == NULL) return ESP_ERR_NO_MEM;
+    thinking_cache_load();
     if (!tts_configured()) {
         ESP_LOGW(TAG, "voice disabled; configure Volcengine TTS API key");
     }
