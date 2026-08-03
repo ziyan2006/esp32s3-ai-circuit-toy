@@ -16,6 +16,8 @@
 #include "circuit_layout.h"
 #include "c6_network_test.h"
 #include "game_judge.h"
+#include "level_intro.h"
+#include "learning_activity.h"
 #include "level_rules.h"
 #include "play_mode.h"
 #include "campaign_content.h"
@@ -69,6 +71,8 @@ typedef enum {
     UI_PAGE_HOME = 0,
     UI_PAGE_CAMPAIGN,
     UI_PAGE_DETAIL,
+    UI_PAGE_INTRO,
+    UI_PAGE_LEARNING_ACTIVITY,
     UI_PAGE_PLAY,
     UI_PAGE_SUCCESS,
     UI_PAGE_SETTINGS,
@@ -137,6 +141,19 @@ typedef struct {
     lv_obj_t *detail_ship_reward;
     lv_obj_t *detail_start;
     lv_obj_t *detail_start_label;
+    lv_obj_t *intro_page;
+    lv_obj_t *intro_speaker;
+    lv_obj_t *intro_text;
+    lv_obj_t *intro_controls;
+    lv_obj_t *learning_round;
+    lv_obj_t *learning_title;
+    lv_obj_t *learning_instruction;
+    lv_obj_t *learning_column_titles[2];
+    lv_obj_t *learning_slots[LEARNING_ACTIVITY_MAX_SLOT_COUNT];
+    lv_obj_t *learning_slot_labels[LEARNING_ACTIVITY_MAX_SLOT_COUNT];
+    lv_obj_t *learning_readout;
+    lv_obj_t *learning_status;
+    lv_obj_t *learning_controls;
     lv_obj_t *settings_sync_status;
     lv_obj_t *settings_unlock_status;
     lv_obj_t *settings_initialize_status;
@@ -193,6 +210,8 @@ static uint8_t s_settings_wifi_keyboard_mode;
 static uint8_t s_settings_debug_selection = UI_DEBUG_SPEAKER_TEST;
 static uint16_t s_node_count;
 static uint16_t s_selected_node;
+static uint8_t s_intro_page_index;
+static uint32_t s_learning_generation;
 static int32_t s_map_offset_x;
 static int32_t s_map_offset_y;
 static char s_campaign_summary[UI_CAMPAIGN_SUMMARY_SIZE];
@@ -1490,6 +1509,227 @@ static void ui_refresh_detail(void)
     lv_obj_scroll_to_y(lv_obj_get_parent(s_ui.detail_story), 0, LV_ANIM_OFF);
 }
 
+static void ui_refresh_intro(void)
+{
+    const campaign_node_t *node = &ui_nodes()[s_selected_node];
+    const uint8_t page_count = level_intro_page_count(node->id);
+    const level_intro_page_t *page = level_intro_page_get(node->id, s_intro_page_index);
+    if (page_count == 0U || page == NULL) return;
+
+    lv_label_set_text_fmt(s_ui.intro_page, "第 %03u 关  通讯 %u / %u",
+                          node->id, (unsigned)(s_intro_page_index + 1U), (unsigned)page_count);
+    lv_label_set_text(s_ui.intro_speaker, page->speaker);
+    lv_label_set_text(s_ui.intro_text, page->text);
+    const bool starts_learning = learning_activity_is_available(node->id);
+    lv_label_set_text(s_ui.intro_controls,
+                      s_intro_page_index + 1U < page_count ?
+                          "左键返回    中键继续    右键跳过" :
+                          (starts_learning ? "左键返回    中键进入训练    右键跳过" :
+                                             "左键返回    中键开始组装    右键跳过"));
+}
+
+static uint8_t ui_learning_bit(uint8_t bits, uint8_t slot_count, uint8_t column)
+{
+    return slot_count == 0U || column >= slot_count ? 0U :
+        (uint8_t)((bits >> (slot_count - 1U - column)) & 1U);
+}
+
+static void ui_style_learning_slot(lv_obj_t *slot, bool active, bool occupied)
+{
+    if (slot == NULL) return;
+    lv_obj_set_style_bg_color(slot, lv_color_hex(active ?
+                                                   (occupied ? UI_COLOR_GREEN : UI_COLOR_SURFACE_HI) :
+                                                   UI_COLOR_SURFACE), 0);
+    lv_obj_set_style_bg_opa(slot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(slot, lv_color_hex(active ? UI_COLOR_CYAN : UI_COLOR_BORDER), 0);
+    lv_obj_set_style_border_width(slot, active ? 2 : 1, 0);
+}
+
+static void ui_refresh_learning_activity(void)
+{
+    learning_activity_state_t state;
+    if (!learning_activity_get_state(&state)) return;
+
+    const bool is_half_adder = state.kind == LEARNING_ACTIVITY_KIND_HALF_ADDER;
+    const bool is_full_adder = state.kind == LEARNING_ACTIVITY_KIND_FULL_ADDER;
+    const bool is_adder = is_half_adder || is_full_adder;
+    static const int32_t binary_cell_x[LEARNING_ACTIVITY_MAX_SLOT_COUNT] = {34, 244, 454, 664, 0};
+    static const int32_t binary_cell_y[LEARNING_ACTIVITY_MAX_SLOT_COUNT] = {180, 180, 180, 180, 0};
+    static const int32_t half_adder_cell_x[LEARNING_ACTIVITY_MAX_SLOT_COUNT] = {34, 34, 454, 454, 0};
+    static const int32_t half_adder_cell_y[LEARNING_ACTIVITY_MAX_SLOT_COUNT] = {174, 264, 174, 264, 0};
+    static const int32_t full_adder_cell_x[LEARNING_ACTIVITY_MAX_SLOT_COUNT] = {34, 34, 34, 454, 454};
+    static const int32_t full_adder_cell_y[LEARNING_ACTIVITY_MAX_SLOT_COUNT] = {160, 226, 292, 194, 260};
+    const uint8_t target_a = ui_learning_bit(state.target_bits, state.slot_count, 0U);
+    const uint8_t target_b = ui_learning_bit(state.target_bits, state.slot_count, 1U);
+    const uint8_t target_cin = ui_learning_bit(state.target_bits, state.slot_count, 2U);
+    const uint8_t target_sum = ui_learning_bit(state.target_bits, state.slot_count,
+                                               is_full_adder ? 3U : 2U);
+    const uint8_t target_carry = ui_learning_bit(state.target_bits, state.slot_count,
+                                                 is_full_adder ? 4U : 3U);
+
+    if (is_full_adder) {
+        lv_label_set_text_fmt(s_ui.learning_round, "全加器训练  %u / %u",
+                              (unsigned)(state.round_index + 1U), (unsigned)state.round_total);
+        lv_label_set_text_fmt(s_ui.learning_title, "放好 %u + %u + %u 的结果",
+                              (unsigned)target_a, (unsigned)target_b, (unsigned)target_cin);
+        lv_label_set_text(s_ui.learning_instruction,
+                          "左列从上到下是 A、B、进位输入，右列从上到下是个位、进位输出。空槽是 0，放入积木是 1。");
+        lv_label_set_text_fmt(s_ui.learning_readout, "当前：A=%u  B=%u  进位输入=%u  个位=%u  进位输出=%u",
+                              ui_learning_bit(state.bits, state.slot_count, 0U),
+                              ui_learning_bit(state.bits, state.slot_count, 1U),
+                              ui_learning_bit(state.bits, state.slot_count, 2U),
+                              ui_learning_bit(state.bits, state.slot_count, 3U),
+                              ui_learning_bit(state.bits, state.slot_count, 4U));
+    } else if (is_half_adder) {
+        lv_label_set_text_fmt(s_ui.learning_round, "半加器训练  %u / %u",
+                              (unsigned)(state.round_index + 1U), (unsigned)state.round_total);
+        lv_label_set_text_fmt(s_ui.learning_title, "放好 %u + %u 的结果",
+                              (unsigned)target_a, (unsigned)target_b);
+        lv_label_set_text(s_ui.learning_instruction,
+                          "左列从上到下是 A、B，右列从上到下是个位、进位。空槽是 0，放入积木是 1。");
+        lv_label_set_text_fmt(s_ui.learning_readout, "当前：A=%u  B=%u  个位=%u  进位=%u",
+                              ui_learning_bit(state.bits, state.slot_count, 0U),
+                              ui_learning_bit(state.bits, state.slot_count, 1U),
+                              ui_learning_bit(state.bits, state.slot_count, 2U),
+                              ui_learning_bit(state.bits, state.slot_count, 3U));
+    } else {
+        lv_label_set_text_fmt(s_ui.learning_round, "二进制训练  %u / %u",
+                              (unsigned)(state.round_index + 1U), (unsigned)state.round_total);
+        lv_label_set_text_fmt(s_ui.learning_title, "让图灵号读出数字 %u",
+                              (unsigned)state.target_decimal);
+        switch (state.round_index) {
+        case 0U:
+            lv_label_set_text(s_ui.learning_instruction,
+                              "最上方高亮的一行就是数字输入区。空槽是 0，放入任意积木就是 1。最右边代表 1，往左会翻倍。");
+            break;
+        case 1U:
+            lv_label_set_text(s_ui.learning_instruction,
+                              "这次没有单独代表 5 的槽。试着把两块积木放进最上方高亮行，让它们的数字加起来。");
+            break;
+        default:
+            lv_label_set_text(s_ui.learning_instruction,
+                              "二进制里，1 加 1 会写成 10。让最右边空着，在它左边的 2 位放入一块积木。");
+            break;
+        }
+        lv_label_set_text_fmt(s_ui.learning_readout, "当前识别：%u%u%u%u  =  %u",
+                              ui_learning_bit(state.bits, state.slot_count, 0U),
+                              ui_learning_bit(state.bits, state.slot_count, 1U),
+                              ui_learning_bit(state.bits, state.slot_count, 2U),
+                              ui_learning_bit(state.bits, state.slot_count, 3U),
+                              (unsigned)state.current_decimal);
+    }
+
+    if (state.complete) {
+        lv_label_set_text(s_ui.learning_status,
+                          is_full_adder ? "训练完成！全加器会处理三个输入，并给出个位和进位。中键开始组装。" :
+                          is_half_adder ? "训练完成！半加器会同时给出个位和进位。中键开始组装。" :
+                                          "训练完成！二进制 0010 就是十进制 2。中键开始组装。");
+        lv_label_set_text(s_ui.learning_controls, "右键跳过    中键开始组装");
+    } else if (state.solved) {
+        if (is_adder) {
+            lv_label_set_text_fmt(s_ui.learning_status, "答对啦！个位是 %u，进位是 %u。中键进入下一题。",
+                                  (unsigned)target_sum, (unsigned)target_carry);
+        } else {
+            lv_label_set_text(s_ui.learning_status, "答对啦！中键进入下一题。");
+        }
+        lv_label_set_text(s_ui.learning_controls, "右键跳过    中键下一题");
+    } else {
+        if (is_full_adder) {
+            lv_label_set_text_fmt(s_ui.learning_status,
+                                  "目标是 %u + %u + %u。先放好三个输入，再想想个位和进位输出。",
+                                  (unsigned)target_a, (unsigned)target_b, (unsigned)target_cin);
+        } else if (is_half_adder) {
+            lv_label_set_text_fmt(s_ui.learning_status,
+                                  "目标是 %u + %u。先放 A 和 B，再想想个位和进位。",
+                                  (unsigned)target_a, (unsigned)target_b);
+        } else {
+            lv_label_set_text_fmt(s_ui.learning_status,
+                                  "当前是 %u，目标是 %u。把积木放进最上方高亮行试试。",
+                                  (unsigned)state.current_decimal, (unsigned)state.target_decimal);
+        }
+        lv_label_set_text(s_ui.learning_controls, "右键跳过    完成后按中键继续");
+    }
+    lv_obj_set_style_text_color(s_ui.learning_status,
+                                lv_color_hex(state.solved ? UI_COLOR_GREEN : UI_COLOR_MUTED), 0);
+
+    if (is_adder) {
+        lv_label_set_text(s_ui.learning_column_titles[0], "输入");
+        lv_label_set_text(s_ui.learning_column_titles[1], "计算结果");
+        lv_obj_clear_flag(s_ui.learning_column_titles[0], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_ui.learning_column_titles[1], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(s_ui.learning_readout, 34, 350);
+        lv_obj_set_pos(s_ui.learning_status, 34, 390);
+        lv_obj_set_pos(s_ui.learning_controls, 34, 430);
+    } else {
+        lv_obj_add_flag(s_ui.learning_column_titles[0], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_ui.learning_column_titles[1], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(s_ui.learning_readout, 34, 292);
+        lv_obj_set_pos(s_ui.learning_status, 34, 350);
+        lv_obj_set_pos(s_ui.learning_controls, 34, 414);
+    }
+
+    static const uint8_t weights[LEARNING_ACTIVITY_BINARY_COLUMN_COUNT] = {8U, 4U, 2U, 1U};
+    static const char *half_adder_roles[LEARNING_ACTIVITY_BINARY_COLUMN_COUNT] = {
+        "A", "B", "个位", "进位",
+    };
+    static const char *full_adder_roles[LEARNING_ACTIVITY_MAX_SLOT_COUNT] = {
+        "A", "B", "进位输入", "个位", "进位输出",
+    };
+    for (uint8_t column = 0U; column < LEARNING_ACTIVITY_MAX_SLOT_COUNT; ++column) {
+        if (column >= state.slot_count) {
+            lv_obj_add_flag(s_ui.learning_slots[column], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_clear_flag(s_ui.learning_slots[column], LV_OBJ_FLAG_HIDDEN);
+        const uint8_t bit = ui_learning_bit(state.bits, state.slot_count, column);
+        lv_obj_set_pos(s_ui.learning_slots[column],
+                       is_full_adder ? full_adder_cell_x[column] :
+                           is_half_adder ? half_adder_cell_x[column] : binary_cell_x[column],
+                       is_full_adder ? full_adder_cell_y[column] :
+                           is_half_adder ? half_adder_cell_y[column] : binary_cell_y[column]);
+        lv_obj_set_size(s_ui.learning_slots[column], is_adder ? 396 : 190,
+                        is_full_adder ? 56 : is_half_adder ? 72 : 88);
+        ui_style_learning_slot(s_ui.learning_slots[column], true, bit != 0U);
+        if (is_full_adder) {
+            lv_label_set_text_fmt(s_ui.learning_slot_labels[column], "%s\n%u",
+                                  full_adder_roles[column], (unsigned)bit);
+        } else if (is_half_adder) {
+            lv_label_set_text_fmt(s_ui.learning_slot_labels[column], "%s\n%u",
+                                  half_adder_roles[column], (unsigned)bit);
+        } else {
+            lv_label_set_text_fmt(s_ui.learning_slot_labels[column], "%u\n%u",
+                                  (unsigned)weights[column], (unsigned)bit);
+        }
+    }
+}
+static void ui_start_learning_or_play(void)
+{
+    const uint16_t level_id = ui_nodes()[s_selected_node].id;
+    if (learning_activity_begin(level_id)) {
+        s_learning_generation = UINT32_MAX;
+        ui_load_page(UI_PAGE_LEARNING_ACTIVITY);
+    } else {
+        ui_load_page(UI_PAGE_PLAY);
+    }
+}
+
+static void ui_advance_intro(void)
+{
+    const uint8_t page_count = level_intro_page_count(ui_nodes()[s_selected_node].id);
+    if (page_count == 0U) {
+        ui_start_learning_or_play();
+        return;
+    }
+    if (s_intro_page_index + 1U < page_count) {
+        ++s_intro_page_index;
+        audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+        ui_refresh_intro();
+        return;
+    }
+    audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+    ui_start_learning_or_play();
+}
+
 static uint32_t ui_reward_stage_id(uint16_t node_id)
 {
     switch (node_id) {
@@ -1553,7 +1793,12 @@ static void ui_start_play(void)
     }
     audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
     if (node->kind == CAMPAIGN_NODE_KIND_STANDARD && level_rule_get(node->id) != NULL) {
-        ui_load_page(UI_PAGE_PLAY);
+        if (level_intro_page_count(node->id) > 0U) {
+            s_intro_page_index = 0U;
+            ui_load_page(UI_PAGE_INTRO);
+        } else {
+            ui_start_learning_or_play();
+        }
     } else if (node->kind == CAMPAIGN_NODE_KIND_REWARD) {
         const uint32_t stage_id = ui_reward_stage_id(node->id);
         if (stage_id != 0U) ui_enter_shooter(stage_id);
@@ -1564,6 +1809,84 @@ static void ui_start_play_event_cb(lv_event_t *event)
 {
     (void)event;
     ui_start_play();
+}
+
+static void ui_create_intro_screen(void)
+{
+    lv_obj_t *screen = lv_obj_create(NULL);
+    s_ui.screen[UI_PAGE_INTRO] = screen;
+    ui_style_screen(screen);
+    ui_create_starfield(screen);
+    ui_create_header(screen, "星际冒险", "初次通讯", true);
+
+    lv_obj_t *panel = ui_create_panel(screen, 132, 112, 760, 390);
+    ui_add_pixel_corners(panel, UI_COLOR_CYAN);
+    ui_create_accent(panel, 0, 0, 220, UI_COLOR_YELLOW);
+    ui_create_signal_icon(panel, 54, 82, UI_COLOR_CYAN, 1U);
+
+    s_ui.intro_page = ui_create_label(panel, "", 192, 52, 510, UI_COLOR_AMBER);
+    ui_set_compact_font(s_ui.intro_page);
+    s_ui.intro_speaker = ui_create_label(panel, "", 192, 88, 510, UI_COLOR_TEXT);
+    lv_obj_set_style_text_font(s_ui.intro_speaker, &app_ui_font_cn_24, 0);
+    s_ui.intro_text = ui_create_label(panel, "", 192, 132, 510, UI_COLOR_MUTED);
+    lv_obj_set_height(s_ui.intro_text, 150);
+    lv_label_set_long_mode(s_ui.intro_text, LV_LABEL_LONG_WRAP);
+    ui_create_accent(panel, 54, 304, 652, UI_COLOR_BORDER);
+    s_ui.intro_controls = ui_create_label(panel, "", 54, 330, 652, UI_COLOR_CYAN);
+    ui_set_compact_font(s_ui.intro_controls);
+    lv_obj_set_style_text_align(s_ui.intro_controls, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+static void ui_create_learning_activity_screen(void)
+{
+    lv_obj_t *screen = lv_obj_create(NULL);
+    s_ui.screen[UI_PAGE_LEARNING_ACTIVITY] = screen;
+    ui_style_screen(screen);
+    ui_create_starfield(screen);
+    ui_create_header(screen, "星际冒险", "逻辑训练", true);
+
+    lv_obj_t *panel = ui_create_panel(screen, 70, 98, 884, 454);
+    ui_add_pixel_corners(panel, UI_COLOR_CYAN);
+    ui_create_accent(panel, 0, 0, 210, UI_COLOR_YELLOW);
+    s_ui.learning_round = ui_create_label(panel, "", 34, 24, 240, UI_COLOR_AMBER);
+    ui_set_compact_font(s_ui.learning_round);
+    s_ui.learning_title = ui_create_label(panel, "", 34, 55, 600, UI_COLOR_TEXT);
+    lv_obj_set_style_text_font(s_ui.learning_title, &app_ui_font_cn_24, 0);
+    s_ui.learning_instruction = ui_create_label(panel, "", 34, 94, 810, UI_COLOR_MUTED);
+    lv_obj_set_height(s_ui.learning_instruction, 62);
+    lv_label_set_long_mode(s_ui.learning_instruction, LV_LABEL_LONG_WRAP);
+
+    static const char *const column_titles[2] = {"输入", "计算结果"};
+    for (uint8_t column = 0U; column < 2U; ++column) {
+        s_ui.learning_column_titles[column] = ui_create_label(panel, column_titles[column],
+                                                               column == 0U ? 34 : 454, 142, 396,
+                                                               UI_COLOR_CYAN);
+        lv_obj_set_style_text_align(s_ui.learning_column_titles[column], LV_TEXT_ALIGN_CENTER, 0);
+        ui_set_compact_font(s_ui.learning_column_titles[column]);
+    }
+    for (uint8_t column = 0U; column < LEARNING_ACTIVITY_MAX_SLOT_COUNT; ++column) {
+        lv_obj_t *cell = lv_obj_create(panel);
+        lv_obj_set_pos(cell, 34 + (int32_t)column * 210, 180);
+        lv_obj_set_size(cell, 190, 88);
+        lv_obj_clear_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(cell, 8, 0);
+        lv_obj_set_style_pad_all(cell, 0, 0);
+        lv_obj_set_style_border_width(cell, 1, 0);
+        s_ui.learning_slots[column] = cell;
+        s_ui.learning_slot_labels[column] = lv_label_create(cell);
+        lv_obj_set_style_text_font(s_ui.learning_slot_labels[column], &app_ui_font_cn_24, 0);
+        lv_obj_set_style_text_color(s_ui.learning_slot_labels[column], lv_color_hex(UI_COLOR_TEXT), 0);
+        lv_obj_set_style_text_align(s_ui.learning_slot_labels[column], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(s_ui.learning_slot_labels[column]);
+    }
+    s_ui.learning_readout = ui_create_label(panel, "", 34, 292, 810, UI_COLOR_CYAN);
+    lv_obj_set_style_text_align(s_ui.learning_readout, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(s_ui.learning_readout, &app_ui_font_cn_24, 0);
+    s_ui.learning_status = ui_create_label(panel, "", 34, 350, 810, UI_COLOR_MUTED);
+    lv_obj_set_style_text_align(s_ui.learning_status, LV_TEXT_ALIGN_CENTER, 0);
+    s_ui.learning_controls = ui_create_label(panel, "", 34, 414, 810, UI_COLOR_CYAN);
+    ui_set_compact_font(s_ui.learning_controls);
+    lv_obj_set_style_text_align(s_ui.learning_controls, LV_TEXT_ALIGN_CENTER, 0);
 }
 
 static void ui_create_detail_screen(void)
@@ -2702,6 +3025,9 @@ static void ui_load_page(ui_page_t page)
         play_mode_set_active(false);
         board_snapshot_reset(false);
     }
+    if (s_page == UI_PAGE_LEARNING_ACTIVITY && page != UI_PAGE_LEARNING_ACTIVITY) {
+        learning_activity_stop();
+    }
     if ((s_page == UI_PAGE_DIAGNOSTICS || s_page == UI_PAGE_SETTINGS ||
          s_page == UI_PAGE_SETTINGS_DEBUG) && page != s_page) {
         audio_self_test_set_tone_enabled(false);
@@ -2710,6 +3036,10 @@ static void ui_load_page(ui_page_t page)
         ui_refresh_campaign();
     } else if (page == UI_PAGE_DETAIL) {
         ui_refresh_detail();
+    } else if (page == UI_PAGE_INTRO) {
+        ui_refresh_intro();
+    } else if (page == UI_PAGE_LEARNING_ACTIVITY) {
+        ui_refresh_learning_activity();
     } else if (page == UI_PAGE_PLAY) {
         ui_refresh_play();
     } else if (page == UI_PAGE_SUCCESS) {
@@ -2995,6 +3325,8 @@ esp_err_t app_ui_init(void)
     ui_create_home_screen();
     ui_create_campaign_screen();
     ui_create_detail_screen();
+    ui_create_intro_screen();
+    ui_create_learning_activity_screen();
     ui_create_play_screen();
     ui_create_success_screen();
     ui_create_settings_screen();
@@ -3013,7 +3345,7 @@ esp_err_t app_ui_init(void)
     lv_mem_monitor(&memory);
 
     esp_lv_adapter_unlock();
-    ESP_LOGI(TAG, "sci-fi UI ready: %u campaign nodes, ten persistent screens; "
+    ESP_LOGI(TAG, "sci-fi UI ready: %u campaign nodes, twelve persistent screens; "
              "LVGL memory=%u%% free=%u largest=%u frag=%u%%",
              s_node_count, memory.used_pct, (unsigned)memory.free_size,
              (unsigned)memory.free_biggest_size, memory.frag_pct);
@@ -3207,6 +3539,28 @@ esp_err_t app_ui_update(const key_input_state_t *keys,
             }
         } else if (!programmer_owns_input && s_page == UI_PAGE_DETAIL) {
             if (key1_edge) ui_start_play();
+        } else if (!programmer_owns_input && s_page == UI_PAGE_INTRO) {
+            if (key0_edge) {
+                audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+                ui_start_learning_or_play();
+            } else if (key1_edge) {
+                ui_advance_intro();
+            }
+        } else if (!programmer_owns_input && s_page == UI_PAGE_LEARNING_ACTIVITY) {
+            if (key0_edge) {
+                audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+                ui_load_page(UI_PAGE_PLAY);
+            } else if (key1_edge) {
+                if (learning_activity_is_complete()) {
+                    audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+                    ui_load_page(UI_PAGE_PLAY);
+                } else if (learning_activity_advance()) {
+                    audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
+                    ui_refresh_learning_activity();
+                } else {
+                    audio_self_test_play_effect(AUDIO_EFFECT_ERROR);
+                }
+            }
         } else if (!programmer_owns_input && s_page == UI_PAGE_PLAY) {
             if (up_edge || down_edge) {
                 s_play_action_selection = s_play_action_selection == 0U ? 1U : 0U;
@@ -3233,7 +3587,17 @@ esp_err_t app_ui_update(const key_input_state_t *keys,
     } else {
         audio_self_test_set_tone_enabled(settings_tone);
     }
-    if (s_page == UI_PAGE_PLAY) {
+    if (s_page == UI_PAGE_LEARNING_ACTIVITY) {
+        board_snapshot_t snapshot;
+        if (board_snapshot_get(&snapshot)) {
+            learning_activity_update_snapshot(&snapshot);
+            learning_activity_state_t state;
+            if (learning_activity_get_state(&state) && state.generation != s_learning_generation) {
+                s_learning_generation = state.generation;
+                ui_refresh_learning_activity();
+            }
+        }
+    } else if (s_page == UI_PAGE_PLAY) {
         ui_refresh_play();
         ui_log_play_health();
     } else if (s_page == UI_PAGE_SHOOTER) {

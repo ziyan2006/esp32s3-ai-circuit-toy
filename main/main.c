@@ -33,6 +33,8 @@
 #include "circuit_logic.h"
 #include "game_judge.h"
 #include "game_logic_self_test.h"
+#include "level_intro.h"
+#include "learning_activity.h"
 #include "play_mode.h"
 #include "progress_sync.h"
 #include "c6_network_test.h"
@@ -361,6 +363,22 @@ static void ws2812_render_port_highlight(const board_snapshot_t *snapshot)
     }
 }
 
+static void ws2812_render_learning_activity(void)
+{
+    static const ws2812_color_t learning_color = {.green = 156, .red = 0, .blue = 92};
+
+    ws2812_clear_frame();
+    for (uint8_t column = 0U; column < LEARNING_ACTIVITY_MAX_SLOT_COUNT; ++column) {
+        const uint8_t slot = learning_activity_slot_for_column(column);
+        if (slot >= BOARD_SNAPSHOT_SLOT_COUNT) continue;
+        for (uint8_t local_port = 0U; local_port < BOARD_SNAPSHOT_PORTS_PER_SLOT; ++local_port) {
+            const uint8_t port = (uint8_t)(slot * BOARD_SNAPSHOT_PORTS_PER_SLOT + local_port);
+            const uint8_t led = board_mapping_ws2812_index_for_port(port);
+            if (led < WS2812_LED_COUNT) ws2812_set_led_color(led, &learning_color);
+        }
+    }
+}
+
 static void ws2812_connection_task(void *arg)
 {
     board_snapshot_t snapshot;
@@ -372,12 +390,21 @@ static void ws2812_connection_task(void *arg)
     (void)arg;
     for (;;) {
         const uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
-        if (!play_mode_is_active()) {
+        const bool learning_active = learning_activity_is_active();
+        if (!play_mode_is_active() && !learning_active) {
             if (output_active) {
                 ws2812_clear_frame();
                 ESP_ERROR_CHECK(ws2812_transmit_frame());
                 output_active = false;
             }
+            continue;
+        }
+        if (learning_active) {
+            ws2812_render_learning_activity();
+            if (ws2812_frame_needs_transmit()) {
+                ESP_ERROR_CHECK(ws2812_transmit_frame());
+            }
+            output_active = true;
             continue;
         }
         circuit_debug_state_t debug;
@@ -474,6 +501,8 @@ void app_main(void)
     tuco_port_highlight_init();
     circuit_debug_init();
     ESP_ERROR_CHECK(game_logic_self_test_run());
+    ESP_ERROR_CHECK(level_intro_self_test_run());
+    ESP_ERROR_CHECK(learning_activity_self_test_run());
     ESP_ERROR_CHECK(assistant_mode_self_test_run());
     ESP_ERROR_CHECK(tuco_agent_context_self_test_run());
     ESP_ERROR_CHECK(run_shooter_self_tests());

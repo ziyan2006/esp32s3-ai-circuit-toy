@@ -20,6 +20,7 @@
 #include "app_ui.h"
 #include "board_mapping.h"
 #include "board_snapshot.h"
+#include "learning_activity.h"
 #include "play_mode.h"
 
 #define PROGRAMMER_I2C_PORT       I2C_NUM_0
@@ -87,6 +88,11 @@ typedef struct {
 } programmer_render_request_t;
 
 static const char *TAG = "block_i2c";
+
+static bool baseboard_scan_is_active(void)
+{
+    return play_mode_is_active() || learning_activity_is_active();
+}
 static i2c_master_bus_handle_t s_programmer_bus;
 static i2c_master_bus_handle_t s_baseboard_bus;
 static i2c_master_dev_handle_t s_programmer_oled_3c;
@@ -885,7 +891,7 @@ static void baseboard_i2c_task(void *arg)
 
     (void)arg;
     for (;;) {
-        if (!play_mode_is_active()) {
+        if (!baseboard_scan_is_active()) {
             if (was_play_active) {
                 if (baseboard_access_begin() == ESP_OK) {
                     baseboard_disable_all_channels();
