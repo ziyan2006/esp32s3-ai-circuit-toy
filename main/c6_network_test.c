@@ -46,6 +46,7 @@ static const c6_preset_t s_presets[] = {
 
 static EventGroupHandle_t s_wifi_events;
 static QueueHandle_t s_command_queue;
+static esp_netif_t *s_wifi_netif;
 static c6_network_status_t s_status;
 static c6_network_scan_result_t s_scan_results[C6_NETWORK_SCAN_MAX];
 static portMUX_TYPE s_network_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -98,6 +99,21 @@ static void c6_ip_event_handler(void *arg, esp_event_base_t base, int32_t id, vo
     (void)arg;
     (void)data;
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        esp_netif_dns_info_t primary_dns = {
+            .ip = ESP_IP4ADDR_INIT(223, 5, 5, 5),
+        };
+        esp_netif_dns_info_t backup_dns = {
+            .ip = ESP_IP4ADDR_INIT(119, 29, 29, 29),
+        };
+        if (s_wifi_netif != NULL) {
+            const esp_err_t primary_err = esp_netif_set_dns_info(
+                s_wifi_netif, ESP_NETIF_DNS_MAIN, &primary_dns);
+            const esp_err_t backup_err = esp_netif_set_dns_info(
+                s_wifi_netif, ESP_NETIF_DNS_BACKUP, &backup_dns);
+            ESP_LOGI(TAG, "DNS configured primary=%s backup=%s result=%s/%s",
+                     "223.5.5.5", "119.29.29.29", esp_err_to_name(primary_err),
+                     esp_err_to_name(backup_err));
+        }
         xEventGroupSetBits(s_wifi_events, C6_WIFI_CONNECTED);
     }
 }
@@ -109,10 +125,11 @@ static esp_err_t c6_wifi_stack_init(void)
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
     err = esp_event_loop_create_default();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
-    if (esp_netif_create_default_wifi_sta() == NULL) return ESP_ERR_NO_MEM;
+    s_wifi_netif = esp_netif_create_default_wifi_sta();
+    if (s_wifi_netif == NULL) return ESP_ERR_NO_MEM;
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&config), TAG, "initialize remote Wi-Fi");
-    ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "set Wi-Fi storage");
+    ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_FLASH), TAG, "set Wi-Fi storage");
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "set station mode");
     ESP_RETURN_ON_ERROR(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                     c6_wifi_event_handler, NULL),
@@ -170,8 +187,19 @@ static esp_err_t c6_connect(const char *ssid, const char *password, bool manual)
     return ESP_OK;
 }
 
+static esp_err_t c6_connect_saved(void)
+{
+    wifi_config_t config = {0};
+    ESP_RETURN_ON_ERROR(esp_wifi_get_config(WIFI_IF_STA, &config), TAG,
+                        "read saved station config");
+    if (config.sta.ssid[0] == '\0') return ESP_ERR_NOT_FOUND;
+    ESP_LOGI(TAG, "reconnecting saved Wi-Fi profile: %s", (char *)config.sta.ssid);
+    return c6_connect((const char *)config.sta.ssid, (const char *)config.sta.password, true);
+}
+
 static esp_err_t c6_auto_connect(void)
 {
+    if (c6_connect_saved() == ESP_OK) return ESP_OK;
     c6_status_set(C6_NETWORK_SCANNING, false, false, "");
     esp_err_t err = c6_scan();
     if (err != ESP_OK) {

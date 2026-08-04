@@ -1006,10 +1006,12 @@ esp_err_t voice_assistant_init(void)
 
 void voice_assistant_update(bool play_active, bool programmer_owns_input, bool key0_pressed, uint16_t level_id)
 {
+    const bool manual_configured = manual_voice_configured();
     portENTER_CRITICAL(&s_lock);
     s_play_active = play_active; s_programmer_owns_input = programmer_owns_input; s_level_id = level_id;
     const bool pressed = play_active && !programmer_owns_input && key0_pressed;
-    if (pressed && !s_previous_key_pressed) ++s_press_id;
+    const bool press_started = pressed && !s_previous_key_pressed;
+    if (press_started) ++s_press_id;
     s_key_pressed = pressed; s_previous_key_pressed = key0_pressed;
     portEXIT_CRITICAL(&s_lock);
     if (play_active && (!s_session_play_active || s_session_level_id != level_id)) {
@@ -1020,7 +1022,13 @@ void voice_assistant_update(bool play_active, bool programmer_owns_input, bool k
         assistant_router_end_level_session();
         s_session_play_active = false;
     }
-    if (play_active && !programmer_owns_input && s_phase == VOICE_READY && manual_voice_configured()) {
+    if (press_started) {
+        ESP_LOGI(TAG, "manual voice pressed level=%u configured=%u",
+                 (unsigned)level_id, manual_configured);
+    }
+    if (press_started && !manual_configured) {
+        status_set(VOICE_ASSISTANT_DISABLED, true, true, "助教未配置");
+    } else if (play_active && !programmer_owns_input && s_phase == VOICE_READY && manual_configured) {
         status_set(VOICE_ASSISTANT_READY, true, false, "可说话");
     }
 }

@@ -212,6 +212,7 @@ static uint16_t s_node_count;
 static uint16_t s_selected_node;
 static uint8_t s_intro_page_index;
 static uint32_t s_learning_generation;
+static uint32_t s_learning_voice_generation;
 static int32_t s_map_offset_x;
 static int32_t s_map_offset_y;
 static char s_campaign_summary[UI_CAMPAIGN_SUMMARY_SIZE];
@@ -281,9 +282,18 @@ static bool ui_gate_is_unlocked_for_progress(ssd1315_gate_t gate,
     return index >= 0 && completed[index];
 }
 
+static bool ui_gate_is_unlocked_before_level(ssd1315_gate_t gate, uint16_t level_id)
+{
+    if (gate == SSD1315_GATE_INPUT || gate == SSD1315_GATE_OUTPUT) return true;
+    const uint16_t unlock_level = ui_gate_unlock_level(gate);
+    return unlock_level != 0U && unlock_level < level_id;
+}
+
 bool app_ui_gate_is_unlocked(ssd1315_gate_t gate)
 {
-    return ui_gate_is_unlocked_for_progress(gate, s_completed_nodes);
+    if (ui_gate_is_unlocked_for_progress(gate, s_completed_nodes)) return true;
+    if (!s_unlock_all_nodes || s_selected_node >= s_node_count) return false;
+    return ui_gate_is_unlocked_before_level(gate, ui_nodes()[s_selected_node].id);
 }
 
 static bool ui_node_is_unlocked_for_progress(uint16_t index,
@@ -553,6 +563,8 @@ static void ui_back_event_cb(lv_event_t *event)
     } else if (s_page == UI_PAGE_SUCCESS) {
         ui_load_page(UI_PAGE_PLAY);
     } else if (s_page == UI_PAGE_PLAY || s_page == UI_PAGE_DETAIL) {
+        ui_load_page(UI_PAGE_CAMPAIGN);
+    } else if (s_page == UI_PAGE_INTRO || s_page == UI_PAGE_LEARNING_ACTIVITY) {
         ui_load_page(UI_PAGE_CAMPAIGN);
     } else if (s_page != UI_PAGE_HOME) {
         ui_load_page(UI_PAGE_HOME);
@@ -1545,6 +1557,20 @@ static void ui_style_learning_slot(lv_obj_t *slot, bool active, bool occupied)
     lv_obj_set_style_border_width(slot, active ? 2 : 1, 0);
 }
 
+static void ui_set_learning_controls(const char *default_text)
+{
+    voice_assistant_status_t voice;
+    voice_assistant_get_status(&voice);
+    if (voice.visible && voice.state != VOICE_ASSISTANT_READY && voice.text[0] != '\0') {
+        lv_label_set_text_fmt(s_ui.learning_controls, "助教：%s", voice.text);
+        lv_obj_set_style_text_color(s_ui.learning_controls,
+                                    lv_color_hex(voice.error ? UI_COLOR_DANGER : UI_COLOR_AMBER), 0);
+        return;
+    }
+    lv_label_set_text(s_ui.learning_controls, default_text);
+    lv_obj_set_style_text_color(s_ui.learning_controls, lv_color_hex(UI_COLOR_CYAN), 0);
+}
+
 static void ui_refresh_learning_activity(void)
 {
     learning_activity_state_t state;
@@ -1624,7 +1650,7 @@ static void ui_refresh_learning_activity(void)
                           is_full_adder ? "训练完成！全加器会处理三个输入，并给出个位和进位。中键开始组装。" :
                           is_half_adder ? "训练完成！半加器会同时给出个位和进位。中键开始组装。" :
                                           "训练完成！二进制 0010 就是十进制 2。中键开始组装。");
-        lv_label_set_text(s_ui.learning_controls, "右键跳过    中键开始组装");
+        ui_set_learning_controls("按住右键提问    中键开始组装");
     } else if (state.solved) {
         if (is_adder) {
             lv_label_set_text_fmt(s_ui.learning_status, "答对啦！个位是 %u，进位是 %u。中键进入下一题。",
@@ -1632,7 +1658,7 @@ static void ui_refresh_learning_activity(void)
         } else {
             lv_label_set_text(s_ui.learning_status, "答对啦！中键进入下一题。");
         }
-        lv_label_set_text(s_ui.learning_controls, "右键跳过    中键下一题");
+        ui_set_learning_controls("按住右键提问    中键下一题");
     } else {
         if (is_full_adder) {
             lv_label_set_text_fmt(s_ui.learning_status,
@@ -1647,7 +1673,7 @@ static void ui_refresh_learning_activity(void)
                                   "当前是 %u，目标是 %u。把积木放进最上方高亮行试试。",
                                   (unsigned)state.current_decimal, (unsigned)state.target_decimal);
         }
-        lv_label_set_text(s_ui.learning_controls, "右键跳过    完成后按中键继续");
+        ui_set_learning_controls("按住右键提问    完成后按中键继续");
     }
     lv_obj_set_style_text_color(s_ui.learning_status,
                                 lv_color_hex(state.solved ? UI_COLOR_GREEN : UI_COLOR_MUTED), 0);
@@ -1707,6 +1733,7 @@ static void ui_start_learning_or_play(void)
     const uint16_t level_id = ui_nodes()[s_selected_node].id;
     if (learning_activity_begin(level_id)) {
         s_learning_generation = UINT32_MAX;
+        s_learning_voice_generation = UINT32_MAX;
         ui_load_page(UI_PAGE_LEARNING_ACTIVITY);
     } else {
         ui_load_page(UI_PAGE_PLAY);
@@ -1833,7 +1860,7 @@ static void ui_create_intro_screen(void)
     lv_label_set_long_mode(s_ui.intro_text, LV_LABEL_LONG_WRAP);
     ui_create_accent(panel, 54, 304, 652, UI_COLOR_BORDER);
     s_ui.intro_controls = ui_create_label(panel, "", 54, 330, 652, UI_COLOR_CYAN);
-    ui_set_compact_font(s_ui.intro_controls);
+    ui_set_font(s_ui.intro_controls);
     lv_obj_set_style_text_align(s_ui.intro_controls, LV_TEXT_ALIGN_CENTER, 0);
 }
 
@@ -3148,6 +3175,12 @@ static esp_err_t ui_campaign_progression_self_test(void)
         ui_gate_is_unlocked_for_progress(SSD1315_GATE_XNOR, completed)) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (!ui_gate_is_unlocked_before_level(SSD1315_GATE_NAND, 102U) ||
+        ui_gate_is_unlocked_before_level(SSD1315_GATE_NOT, 103U) ||
+        !ui_gate_is_unlocked_before_level(SSD1315_GATE_XOR, 302U) ||
+        ui_gate_is_unlocked_before_level(SSD1315_GATE_XNOR, 302U)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     for (uint16_t index = 0U; index < s_node_count; ++index) {
         const bool initially_unlocked = ui_node_is_unlocked_for_progress(index, completed, false);
         if (initially_unlocked != (index == (uint16_t)level101)) {
@@ -3361,7 +3394,7 @@ esp_err_t app_ui_update(const key_input_state_t *keys,
     if (keys == NULL || joystick == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    voice_assistant_update(s_page == UI_PAGE_PLAY,
+    voice_assistant_update(s_page == UI_PAGE_PLAY || s_page == UI_PAGE_LEARNING_ACTIVITY,
                            programmer_owns_input,
                            keys->key0_pressed,
                            ui_nodes()[s_selected_node].id);
@@ -3547,10 +3580,7 @@ esp_err_t app_ui_update(const key_input_state_t *keys,
                 ui_advance_intro();
             }
         } else if (!programmer_owns_input && s_page == UI_PAGE_LEARNING_ACTIVITY) {
-            if (key0_edge) {
-                audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
-                ui_load_page(UI_PAGE_PLAY);
-            } else if (key1_edge) {
+            if (key1_edge) {
                 if (learning_activity_is_complete()) {
                     audio_self_test_play_effect(AUDIO_EFFECT_CONFIRM);
                     ui_load_page(UI_PAGE_PLAY);
@@ -3588,15 +3618,23 @@ esp_err_t app_ui_update(const key_input_state_t *keys,
         audio_self_test_set_tone_enabled(settings_tone);
     }
     if (s_page == UI_PAGE_LEARNING_ACTIVITY) {
+        bool refresh_learning = false;
         board_snapshot_t snapshot;
         if (board_snapshot_get(&snapshot)) {
             learning_activity_update_snapshot(&snapshot);
             learning_activity_state_t state;
             if (learning_activity_get_state(&state) && state.generation != s_learning_generation) {
                 s_learning_generation = state.generation;
-                ui_refresh_learning_activity();
+                refresh_learning = true;
             }
         }
+        voice_assistant_status_t voice;
+        voice_assistant_get_status(&voice);
+        if (voice.generation != s_learning_voice_generation) {
+            s_learning_voice_generation = voice.generation;
+            refresh_learning = true;
+        }
+        if (refresh_learning) ui_refresh_learning_activity();
     } else if (s_page == UI_PAGE_PLAY) {
         ui_refresh_play();
         ui_log_play_health();

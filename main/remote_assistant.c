@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "learning_activity.h"
 #include "sdkconfig.h"
 #include "tuco_agent.h"
 
@@ -21,13 +22,78 @@
 #define REMOTE_TOOL_ONLY_REPLY "请看亮起的提示，再完成这一步。"
 
 static const char *TAG = "remote_assistant";
-typedef struct { uint32_t id; uint16_t level; char text[REMOTE_REQUEST_TEXT_MAX]; } remote_request_t;
+typedef struct {
+    uint32_t id;
+    uint16_t level;
+    bool has_learning_activity;
+    learning_activity_state_t learning_activity;
+    char text[REMOTE_REQUEST_TEXT_MAX];
+} remote_request_t;
 typedef struct { bool ready; uint32_t id; esp_err_t err; char text[REMOTE_TEXT_MAX]; } remote_result_t;
 static SemaphoreHandle_t s_lock;
 static uint32_t s_next_id;
 static uint32_t s_active_id;
 static uint32_t s_session_counter;
 static remote_result_t s_result;
+
+static const char *learning_activity_kind_name(learning_activity_kind_t kind)
+{
+    switch (kind) {
+    case LEARNING_ACTIVITY_KIND_BINARY_SLOTS: return "binary_slots";
+    case LEARNING_ACTIVITY_KIND_HALF_ADDER: return "half_adder";
+    case LEARNING_ACTIVITY_KIND_FULL_ADDER: return "full_adder";
+    default: return NULL;
+    }
+}
+
+static void add_activity_bits(cJSON *object, const char *name, uint8_t packed_bits,
+                              uint8_t slot_count)
+{
+    cJSON *bits = cJSON_AddArrayToObject(object, name);
+    if (bits == NULL) return;
+    for (uint8_t column = 0U; column < slot_count; ++column) {
+        const uint8_t shift = slot_count - 1U - column;
+        cJSON_AddItemToArray(bits, cJSON_CreateNumber((packed_bits >> shift) & 1U));
+    }
+}
+
+static cJSON *create_learning_activity_json(const learning_activity_state_t *state)
+{
+    static const char *binary_roles[] = {"8", "4", "2", "1"};
+    static const char *half_adder_roles[] = {"A", "B", "个位", "进位"};
+    static const char *full_adder_roles[] = {"A", "B", "进位输入", "个位", "进位输出"};
+    static const uint8_t binary_weights[] = {8U, 4U, 2U, 1U};
+    const char *const *roles = state->kind == LEARNING_ACTIVITY_KIND_BINARY_SLOTS ? binary_roles :
+                               state->kind == LEARNING_ACTIVITY_KIND_HALF_ADDER ? half_adder_roles :
+                               state->kind == LEARNING_ACTIVITY_KIND_FULL_ADDER ? full_adder_roles : NULL;
+    const char *kind = learning_activity_kind_name(state->kind);
+    if (roles == NULL || kind == NULL || state->slot_count == 0U) return NULL;
+
+    cJSON *activity = cJSON_CreateObject();
+    cJSON *role_array = cJSON_AddArrayToObject(activity, "slot_roles");
+    if (activity == NULL || role_array == NULL) { cJSON_Delete(activity); return NULL; }
+    cJSON_AddStringToObject(activity, "kind", kind);
+    cJSON_AddStringToObject(activity, "stage", "practice");
+    cJSON_AddNumberToObject(activity, "round_index", state->round_index + 1U);
+    cJSON_AddNumberToObject(activity, "round_total", state->round_total);
+    for (uint8_t column = 0U; column < state->slot_count; ++column) {
+        cJSON_AddItemToArray(role_array, cJSON_CreateString(roles[column]));
+    }
+    add_activity_bits(activity, "slot_bits", state->bits, state->slot_count);
+    add_activity_bits(activity, "target_bits", state->target_bits, state->slot_count);
+    if (state->kind == LEARNING_ACTIVITY_KIND_BINARY_SLOTS) {
+        cJSON *weights = cJSON_AddArrayToObject(activity, "slot_weights");
+        if (weights == NULL) { cJSON_Delete(activity); return NULL; }
+        for (uint8_t column = 0U; column < state->slot_count; ++column) {
+            cJSON_AddItemToArray(weights, cJSON_CreateNumber(binary_weights[column]));
+        }
+        cJSON_AddNumberToObject(activity, "target_decimal", state->target_decimal);
+        cJSON_AddNumberToObject(activity, "current_decimal", state->current_decimal);
+    }
+    cJSON_AddBoolToObject(activity, "solved", state->solved);
+    cJSON_AddBoolToObject(activity, "complete", state->complete);
+    return activity;
+}
 
 bool remote_assistant_is_configured(void)
 {
@@ -59,6 +125,11 @@ static esp_err_t request_remote(const remote_request_t *request, char *out, size
     cJSON_AddStringToObject(root, "session_id", session);
     cJSON_AddStringToObject(root, "user_text", request->text);
     cJSON_AddItemToObject(root, "circuit_snapshot", circuit);
+    if (request->has_learning_activity) {
+        cJSON *activity = create_learning_activity_json(&request->learning_activity);
+        if (activity == NULL) { cJSON_Delete(root); return ESP_ERR_NO_MEM; }
+        cJSON_AddItemToObject(root, "learning_activity", activity);
+    }
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (body == NULL) return ESP_ERR_NO_MEM;
@@ -103,6 +174,14 @@ static esp_err_t request_remote(const remote_request_t *request, char *out, size
     if (!has_tool) {
         cJSON_Delete(reply);
         return has_text ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
+    }
+    if (request->has_learning_activity) {
+        ESP_LOGW(TAG, "ignored tool call during learning activity request=%lu",
+                 (unsigned long)request->id);
+        cJSON_Delete(reply);
+        if (has_text) return ESP_OK;
+        strlcpy(out, "这一轮我们先用 0 和 1 想一想，不需要操作电路。", out_size);
+        return ESP_OK;
     }
     const cJSON *name = tool == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(tool, "name");
     const cJSON *arguments = tool == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(tool, "arguments");
@@ -172,6 +251,7 @@ esp_err_t remote_assistant_submit(const char *text, uint16_t level_id, uint32_t 
     request->id = ++s_next_id;
     if (request->id == 0U) request->id = ++s_next_id;
     request->level = level_id;
+    request->has_learning_activity = learning_activity_get_state(&request->learning_activity);
     strlcpy(request->text, text, sizeof(request->text));
     s_active_id = request->id;
     memset(&s_result, 0, sizeof(s_result));
