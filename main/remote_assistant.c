@@ -41,6 +41,7 @@ static const char *learning_activity_kind_name(learning_activity_kind_t kind)
     switch (kind) {
     case LEARNING_ACTIVITY_KIND_BINARY_SLOTS: return "binary_slots";
     case LEARNING_ACTIVITY_KIND_HALF_ADDER: return "half_adder";
+    case LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY: return "three_input_parity";
     case LEARNING_ACTIVITY_KIND_FULL_ADDER: return "full_adder";
     default: return NULL;
     }
@@ -61,10 +62,12 @@ static cJSON *create_learning_activity_json(const learning_activity_state_t *sta
 {
     static const char *binary_roles[] = {"8", "4", "2", "1"};
     static const char *half_adder_roles[] = {"A", "B", "个位", "进位"};
+    static const char *three_input_parity_roles[] = {"A", "B", "进位输入"};
     static const char *full_adder_roles[] = {"A", "B", "进位输入", "个位", "进位输出"};
     static const uint8_t binary_weights[] = {8U, 4U, 2U, 1U};
     const char *const *roles = state->kind == LEARNING_ACTIVITY_KIND_BINARY_SLOTS ? binary_roles :
                                state->kind == LEARNING_ACTIVITY_KIND_HALF_ADDER ? half_adder_roles :
+                               state->kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY ? three_input_parity_roles :
                                state->kind == LEARNING_ACTIVITY_KIND_FULL_ADDER ? full_adder_roles : NULL;
     const char *kind = learning_activity_kind_name(state->kind);
     if (roles == NULL || kind == NULL || state->slot_count == 0U) return NULL;
@@ -87,6 +90,9 @@ static cJSON *create_learning_activity_json(const learning_activity_state_t *sta
         for (uint8_t column = 0U; column < state->slot_count; ++column) {
             cJSON_AddItemToArray(weights, cJSON_CreateNumber(binary_weights[column]));
         }
+        cJSON_AddNumberToObject(activity, "target_decimal", state->target_decimal);
+        cJSON_AddNumberToObject(activity, "current_decimal", state->current_decimal);
+    } else if (state->kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY) {
         cJSON_AddNumberToObject(activity, "target_decimal", state->target_decimal);
         cJSON_AddNumberToObject(activity, "current_decimal", state->current_decimal);
     }

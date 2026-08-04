@@ -52,6 +52,21 @@ static const level_intro_page_t s_level_403_pages[] = {
     },
 };
 
+static const level_intro_page_t s_level_501_pages[] = {
+    {
+        .speaker = "图灵号AI",
+        .text = "半加器能把两个二进制数字相加。现在还要把前一位传来的 1 一起算进去。",
+    },
+    {
+        .speaker = "图灵号AI",
+        .text = "先只看个位：三个输入里有 1 个或 3 个 1，个位就是 1；有 0 个或 2 个 1，个位就是 0。",
+    },
+    {
+        .speaker = "图灵号AI",
+        .text = "左边三个槽位就是三个输入。空槽是 0，放入积木是 1。先去训练区数数有几个 1，再开始组装吧！",
+    },
+};
+
 static const level_intro_page_t s_level_504_pages[] = {
     {
         .speaker = "图灵号AI",
@@ -76,6 +91,8 @@ uint8_t level_intro_page_count(uint16_t level_id)
         return (uint8_t)(sizeof(s_level_401_pages) / sizeof(s_level_401_pages[0]));
     case 403U:
         return (uint8_t)(sizeof(s_level_403_pages) / sizeof(s_level_403_pages[0]));
+    case 501U:
+        return (uint8_t)(sizeof(s_level_501_pages) / sizeof(s_level_501_pages[0]));
     case 504U:
         return (uint8_t)(sizeof(s_level_504_pages) / sizeof(s_level_504_pages[0]));
     default:
@@ -93,6 +110,8 @@ const level_intro_page_t *level_intro_page_get(uint16_t level_id, uint8_t page_i
         return &s_level_401_pages[page_index];
     case 403U:
         return &s_level_403_pages[page_index];
+    case 501U:
+        return &s_level_501_pages[page_index];
     case 504U:
         return &s_level_504_pages[page_index];
     default:
@@ -108,6 +127,8 @@ esp_err_t level_intro_self_test_run(void)
     const level_intro_page_t *binary_last = level_intro_page_get(401U, 2U);
     const level_intro_page_t *half_first = level_intro_page_get(403U, 0U);
     const level_intro_page_t *half_last = level_intro_page_get(403U, 2U);
+    const level_intro_page_t *parity_first = level_intro_page_get(501U, 0U);
+    const level_intro_page_t *parity_last = level_intro_page_get(501U, 2U);
     const level_intro_page_t *full_first = level_intro_page_get(504U, 0U);
     const level_intro_page_t *full_last = level_intro_page_get(504U, 2U);
 
@@ -119,6 +140,8 @@ esp_err_t level_intro_self_test_run(void)
                         "level 401 intro page count mismatch");
     ESP_RETURN_ON_FALSE(level_intro_page_count(403U) == 3U, ESP_FAIL, TAG,
                         "level 403 intro page count mismatch");
+    ESP_RETURN_ON_FALSE(level_intro_page_count(501U) == 3U, ESP_FAIL, TAG,
+                        "level 501 intro page count mismatch");
     ESP_RETURN_ON_FALSE(level_intro_page_count(504U) == 3U, ESP_FAIL, TAG,
                         "level 504 intro page count mismatch");
     ESP_RETURN_ON_FALSE(binary_first != NULL && strstr(binary_first->text, "二进制") != NULL,
@@ -129,6 +152,10 @@ esp_err_t level_intro_self_test_run(void)
                         ESP_FAIL, TAG, "level 403 half adder introduction mismatch");
     ESP_RETURN_ON_FALSE(half_last != NULL && strstr(half_last->text, "1 加 1") != NULL,
                         ESP_FAIL, TAG, "level 403 carry guidance mismatch");
+    ESP_RETURN_ON_FALSE(parity_first != NULL && strstr(parity_first->text, "前一位传来的 1") != NULL,
+                        ESP_FAIL, TAG, "level 501 parity introduction mismatch");
+    ESP_RETURN_ON_FALSE(parity_last != NULL && strstr(parity_last->text, "数数有几个 1") != NULL,
+                        ESP_FAIL, TAG, "level 501 parity activity guidance mismatch");
     ESP_RETURN_ON_FALSE(full_first != NULL && strstr(full_first->text, "三个二进制数字") != NULL,
                         ESP_FAIL, TAG, "level 504 full adder introduction mismatch");
     ESP_RETURN_ON_FALSE(full_last != NULL && strstr(full_last->text, "1 加 1 加 1") != NULL,
@@ -139,6 +166,8 @@ esp_err_t level_intro_self_test_run(void)
                         ESP_FAIL, TAG, "level 101 task guidance mismatch");
     ESP_RETURN_ON_FALSE(level_intro_page_get(403U, 3U) == NULL, ESP_FAIL, TAG,
                         "out-of-range level 403 intro page returned");
+    ESP_RETURN_ON_FALSE(level_intro_page_get(501U, 3U) == NULL, ESP_FAIL, TAG,
+                        "out-of-range level 501 intro page returned");
     ESP_RETURN_ON_FALSE(level_intro_page_get(504U, 3U) == NULL, ESP_FAIL, TAG,
                         "out-of-range level 504 intro page returned");
 
