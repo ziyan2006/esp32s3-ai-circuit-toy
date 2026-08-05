@@ -351,15 +351,19 @@ static void ws2812_render_debug(const board_snapshot_t *snapshot,
 
 static void ws2812_render_port_highlight(const board_snapshot_t *snapshot)
 {
-    static const ws2812_color_t highlight_color = {.green = 180, .red = 180, .blue = 0};
+    static const ws2812_color_t connect_color = {.green = 180, .red = 180, .blue = 0};
+    static const ws2812_color_t disconnect_color = {.green = 0, .red = 255, .blue = 0};
     uint8_t ports[BOARD_SNAPSHOT_PORTS_PER_SLOT];
     uint8_t port_count;
     bool visible;
+    tuco_port_highlight_intent_t intent;
 
-    if (!tuco_port_highlight_get(snapshot, ports, &port_count, &visible) || !visible) return;
+    if (!tuco_port_highlight_get(snapshot, ports, &port_count, &visible, &intent) || !visible) return;
+    const ws2812_color_t *color = intent == TUCO_PORT_HIGHLIGHT_DISCONNECT ?
+                                  &disconnect_color : &connect_color;
     for (uint8_t index = 0; index < port_count; ++index) {
         const uint8_t led = board_mapping_ws2812_index_for_port(ports[index]);
-        if (led < WS2812_LED_COUNT) ws2812_set_led_color(led, &highlight_color);
+        if (led < WS2812_LED_COUNT) ws2812_set_led_color(led, color);
     }
 }
 
@@ -499,6 +503,7 @@ void app_main(void)
     play_mode_set_active(false);
     board_snapshot_init();
     tuco_port_highlight_init();
+    ESP_ERROR_CHECK(tuco_port_highlight_self_test_run());
     circuit_debug_init();
     ESP_ERROR_CHECK(game_logic_self_test_run());
     ESP_ERROR_CHECK(level_intro_self_test_run());

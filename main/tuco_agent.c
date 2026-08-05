@@ -155,6 +155,22 @@ static bool snapshot_port_is_connected(const board_snapshot_t *snapshot, uint8_t
     return false;
 }
 
+static bool snapshot_has_link(const board_snapshot_t *snapshot,
+                              uint8_t first_port,
+                              uint8_t second_port)
+{
+    if (snapshot == NULL) return false;
+    for (uint8_t index = 0; index < snapshot->link_count; ++index) {
+        const board_link_t *link = &snapshot->links[index];
+        if (board_link_is_ignored(link)) continue;
+        if ((link->first_port == first_port && link->second_port == second_port) ||
+            (link->first_port == second_port && link->second_port == first_port)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool slot_has_any_link(const board_snapshot_t *snapshot, uint8_t slot)
 {
     const uint8_t first = (uint8_t)(slot * BOARD_SNAPSHOT_PORTS_PER_SLOT);
@@ -521,6 +537,25 @@ static bool parse_tool_gate(cJSON *root, ssd1315_gate_t *out_gate)
     return false;
 }
 
+static bool parse_highlight_intent(cJSON *root, tuco_port_highlight_intent_t *out_intent)
+{
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(root, "intent");
+    if (value == NULL) {
+        *out_intent = TUCO_PORT_HIGHLIGHT_CONNECT;
+        return true;
+    }
+    if (!cJSON_IsString(value) || value->valuestring == NULL) return false;
+    if (strcmp(value->valuestring, "connect") == 0) {
+        *out_intent = TUCO_PORT_HIGHLIGHT_CONNECT;
+        return true;
+    }
+    if (strcmp(value->valuestring, "disconnect") == 0) {
+        *out_intent = TUCO_PORT_HIGHLIGHT_DISCONNECT;
+        return true;
+    }
+    return false;
+}
+
 static bool take_highlight_turn(const claw_core_request_t *request)
 {
     bool already_highlighted;
@@ -586,6 +621,7 @@ static esp_err_t tuco_agent_execute_tool_cap(const char *cap_name,
     uint8_t first;
     uint8_t second;
     ssd1315_gate_t gate;
+    tuco_port_highlight_intent_t highlight_intent = TUCO_PORT_HIGHLIGHT_CONNECT;
 
     (void)user_ctx;
     if (out_output != NULL) *out_output = NULL;
@@ -593,7 +629,7 @@ static esp_err_t tuco_agent_execute_tool_cap(const char *cap_name,
         return tool_result(out_output, ESP_ERR_INVALID_ARG, "工具参数无效。");
     }
     root = cJSON_Parse(input_json);
-    if (!cJSON_IsObject(root) || cJSON_GetArraySize(root) != 2) {
+    if (!cJSON_IsObject(root)) {
         ESP_LOGW(TAG, "tool rejected request=%lu cap=%s reason=bad_json args=%s",
                  (unsigned long)request->request_id, cap_name, input_json);
         cJSON_Delete(root);
@@ -604,22 +640,34 @@ static esp_err_t tuco_agent_execute_tool_cap(const char *cap_name,
         return tool_result(out_output, ESP_ERR_INVALID_STATE, "当前不在游玩状态。");
     }
     if (strcmp(cap_name, "highlight_ports") == 0) {
-        const bool parsed = parse_tool_uint(root, "output_port", BOARD_SNAPSHOT_PORT_COUNT - 1U, &first) &&
-                            parse_tool_uint(root, "input_port", BOARD_SNAPSHOT_PORT_COUNT - 1U, &second);
+        const int argument_count = cJSON_GetArraySize(root);
+        const bool parsed = (argument_count == 2 || argument_count == 3) &&
+                            parse_tool_uint(root, "output_port", BOARD_SNAPSHOT_PORT_COUNT - 1U, &first) &&
+                            parse_tool_uint(root, "input_port", BOARD_SNAPSHOT_PORT_COUNT - 1U, &second) &&
+                            parse_highlight_intent(root, &highlight_intent);
+        const bool common_valid = parsed && first != second &&
+                                  snapshot.slots[board_mapping_slot_for_port(first)].present &&
+                                  snapshot.slots[board_mapping_slot_for_port(first)].id_valid &&
+                                  snapshot.slots[board_mapping_slot_for_port(second)].present &&
+                                  snapshot.slots[board_mapping_slot_for_port(second)].id_valid &&
+                                  snapshot.port_roles[first] == BOARD_PORT_OUTPUT &&
+                                  snapshot.port_roles[second] == BOARD_PORT_INPUT;
+        const bool intent_valid = common_valid &&
+                                  (highlight_intent == TUCO_PORT_HIGHLIGHT_DISCONNECT ?
+                                   snapshot_has_link(&snapshot, first, second) :
+                                   (board_mapping_slot_for_port(first) != board_mapping_slot_for_port(second) &&
+                                    !snapshot_port_is_connected(&snapshot, first) &&
+                                    !snapshot_port_is_connected(&snapshot, second)));
         cJSON_Delete(root);
-        if (!parsed || first == second || board_mapping_slot_for_port(first) == board_mapping_slot_for_port(second) ||
-            !snapshot.slots[board_mapping_slot_for_port(first)].present ||
-            !snapshot.slots[board_mapping_slot_for_port(first)].id_valid ||
-            !snapshot.slots[board_mapping_slot_for_port(second)].present ||
-            !snapshot.slots[board_mapping_slot_for_port(second)].id_valid ||
-            snapshot.port_roles[first] != BOARD_PORT_OUTPUT || snapshot.port_roles[second] != BOARD_PORT_INPUT ||
-            snapshot_port_is_connected(&snapshot, first) || snapshot_port_is_connected(&snapshot, second)) {
+        if (!common_valid || !intent_valid) {
             if (parsed) {
                 ESP_LOGW(TAG,
-                         "highlight ports rejected request=%lu output=%u input=%u topology=%lu "
+                         "highlight ports rejected request=%lu intent=%s output=%u input=%u topology=%lu "
                          "source(slot=%u present=%d valid=%d role=%d linked=%d) "
                          "target(slot=%u present=%d valid=%d role=%d linked=%d)",
-                         (unsigned long)request->request_id, first, second,
+                         (unsigned long)request->request_id,
+                         highlight_intent == TUCO_PORT_HIGHLIGHT_DISCONNECT ? "disconnect" : "connect",
+                         first, second,
                          (unsigned long)snapshot.topology_revision, board_mapping_slot_for_port(first),
                          snapshot.slots[board_mapping_slot_for_port(first)].present,
                          snapshot.slots[board_mapping_slot_for_port(first)].id_valid,
@@ -632,18 +680,28 @@ static esp_err_t tuco_agent_execute_tool_cap(const char *cap_name,
                 ESP_LOGW(TAG, "highlight ports rejected request=%lu reason=bad_args args=%s",
                          (unsigned long)request->request_id, input_json);
             }
-            return tool_result(out_output, ESP_ERR_INVALID_ARG, "端口不是可用的未连线输出端到输入端组合。");
+            return tool_result(out_output, ESP_ERR_INVALID_ARG,
+                               highlight_intent == TUCO_PORT_HIGHLIGHT_DISCONNECT ?
+                               "指定端口之间没有这条真实连线。" :
+                               "端口不是可用的未连线输出端到输入端组合。");
         }
         if (!take_highlight_turn(request)) {
             return tool_result(out_output, ESP_ERR_INVALID_STATE, "本轮不能再高亮端口。");
         }
-        tuco_port_highlight_show(first, second);
-        ESP_LOGI(TAG, "highlight request=%lu output=%u input=%u", (unsigned long)request->request_id, first, second);
-        return tool_result(out_output, ESP_OK, local_feedback ? TUCO_AGENT_HIGHLIGHT_REPLY : NULL);
+        tuco_port_highlight_show(first, second, highlight_intent);
+        ESP_LOGI(TAG, "highlight request=%lu intent=%s output=%u input=%u",
+                 (unsigned long)request->request_id,
+                 highlight_intent == TUCO_PORT_HIGHLIGHT_DISCONNECT ? "disconnect" : "connect",
+                 first, second);
+        return tool_result(out_output, ESP_OK,
+                           local_feedback ?
+                           (highlight_intent == TUCO_PORT_HIGHLIGHT_DISCONNECT ?
+                            "先拆掉亮红灯的这条线。" : TUCO_AGENT_HIGHLIGHT_REPLY) : NULL);
     }
     if (strcmp(cap_name, "highlight_empty_slot") == 0) {
         uint8_t selected_slot = BOARD_SNAPSHOT_SLOT_COUNT;
-        const bool parsed = parse_tool_uint(root, "slot", BOARD_SNAPSHOT_SLOT_COUNT - 1U, &first) &&
+        const bool parsed = cJSON_GetArraySize(root) == 2 &&
+                            parse_tool_uint(root, "slot", BOARD_SNAPSHOT_SLOT_COUNT - 1U, &first) &&
                             parse_tool_gate(root, &gate);
         cJSON_Delete(root);
         if (!parsed || gate_name_zh(gate) == NULL || !app_ui_gate_is_unlocked(gate)) {
