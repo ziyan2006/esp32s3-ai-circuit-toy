@@ -8,6 +8,7 @@
 
 typedef struct {
     uint16_t level_id;
+    uint16_t rule_version;
     uint8_t input_count;
     uint8_t output_count;
     uint8_t case_count;

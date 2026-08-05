@@ -67,10 +67,18 @@ static esp_err_t test_rule_catalog(void)
     const level_rule_t *half_adder = level_rule_get(403);
     ESP_RETURN_ON_FALSE(half_adder->expected_outputs[3] == 2U, ESP_FAIL, TAG,
                         "half adder 1+1 result");
+    const level_rule_t *carry = level_rule_get(502);
+    ESP_RETURN_ON_FALSE(carry != NULL && carry->rule_version == 1U, ESP_FAIL, TAG,
+                        "carry rule version");
+    ESP_RETURN_ON_FALSE(carry->expected_outputs[3] == 1U &&
+                            carry->expected_outputs[4] == 0U,
+                        ESP_FAIL, TAG, "carry truth table ordering");
     static const uint8_t full_adder_expected[8] = {0, 1, 1, 2, 1, 2, 2, 3};
     ESP_RETURN_ON_FALSE(memcmp(level_rule_get(504)->expected_outputs,
                                full_adder_expected, sizeof(full_adder_expected)) == 0,
                         ESP_FAIL, TAG, "full adder truth table");
+    ESP_RETURN_ON_FALSE(level_rule_get(504)->expected_outputs[7] == 3U, ESP_FAIL, TAG,
+                        "full adder all inputs high");
     static const uint8_t mux_expected[8] = {0, 1, 0, 1, 0, 0, 1, 1};
     ESP_RETURN_ON_FALSE(memcmp(level_rule_get(601)->expected_outputs,
                                mux_expected, sizeof(mux_expected)) == 0,
