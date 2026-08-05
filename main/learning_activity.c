@@ -11,6 +11,7 @@ static const char *TAG = "learning_activity";
 static const uint8_t s_binary_targets[] = {4U, 5U, 2U};
 static const uint8_t s_half_adder_patterns[] = {0x6U, 0xDU, 0xAU};
 static const uint8_t s_three_input_parity_patterns[] = {0x4U, 0x6U, 0x7U};
+static const uint8_t s_three_input_carry_patterns[] = {0x4U, 0x6U, 0x7U};
 static const uint8_t s_full_adder_patterns[] = {0x12U, 0x19U, 0x1FU};
 static const uint8_t s_binary_weights[LEARNING_ACTIVITY_BINARY_COLUMN_COUNT] = {8U, 4U, 2U, 1U};
 
@@ -42,6 +43,13 @@ static const learning_activity_definition_t s_definitions[] = {
         .kind = LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY,
         .round_values = s_three_input_parity_patterns,
         .round_total = sizeof(s_three_input_parity_patterns) / sizeof(s_three_input_parity_patterns[0]),
+        .slot_count = LEARNING_ACTIVITY_THREE_INPUT_SLOT_COUNT,
+    },
+    {
+        .level_id = LEARNING_ACTIVITY_THREE_INPUT_CARRY_LEVEL_ID,
+        .kind = LEARNING_ACTIVITY_KIND_THREE_INPUT_CARRY,
+        .round_values = s_three_input_carry_patterns,
+        .round_total = sizeof(s_three_input_carry_patterns) / sizeof(s_three_input_carry_patterns[0]),
         .slot_count = LEARNING_ACTIVITY_THREE_INPUT_SLOT_COUNT,
     },
     {
@@ -141,6 +149,8 @@ static void apply_round_definition(const learning_activity_definition_t *definit
     s_state.target_bits = definition->kind == LEARNING_ACTIVITY_KIND_BINARY_SLOTS ? 0U : value;
     if (definition->kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY) {
         s_state.target_decimal = (uint8_t)(__builtin_popcount((unsigned)value) & 1U);
+    } else if (definition->kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_CARRY) {
+        s_state.target_decimal = __builtin_popcount((unsigned)value) >= 2U ? 1U : 0U;
     }
 }
 
@@ -150,6 +160,8 @@ static void refresh_solution_state(void)
         s_state.current_decimal == s_state.target_decimal :
         s_state.kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY ?
             (s_state.current_decimal & 1U) == s_state.target_decimal :
+        s_state.kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_CARRY ?
+            s_state.current_decimal == __builtin_popcount((unsigned)s_state.target_bits) :
             s_state.bits == s_state.target_bits;
     const bool complete = solved && s_state.round_index + 1U >= s_state.round_total;
     if (s_state.solved != solved || s_state.complete != complete) {
@@ -173,6 +185,9 @@ bool learning_activity_begin(uint16_t level_id)
         s_half_adder_slots : definition->kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY ?
             s_three_input_parity_slots : definition->kind == LEARNING_ACTIVITY_KIND_FULL_ADDER ?
                 s_full_adder_slots : s_binary_slots;
+    if (definition->kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_CARRY) {
+        slots = s_three_input_parity_slots;
+    }
     memcpy(s_active_slots, slots, sizeof(s_active_slots));
 
     s_state = (learning_activity_state_t) {
@@ -215,7 +230,8 @@ void learning_activity_update_snapshot(const board_snapshot_t *snapshot)
         bits |= (uint8_t)(1U << (s_state.slot_count - 1U - column));
         if (s_state.kind == LEARNING_ACTIVITY_KIND_BINARY_SLOTS) {
             current_decimal = (uint8_t)(current_decimal + s_binary_weights[column]);
-        } else if (s_state.kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY) {
+        } else if (s_state.kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY ||
+                   s_state.kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_CARRY) {
             ++current_decimal;
         }
     }
@@ -274,6 +290,8 @@ esp_err_t learning_activity_self_test_run(void)
                         ESP_FAIL, TAG, "half adder activity should be available");
     ESP_RETURN_ON_FALSE(learning_activity_is_available(LEARNING_ACTIVITY_THREE_INPUT_PARITY_LEVEL_ID),
                         ESP_FAIL, TAG, "three input parity activity should be available");
+    ESP_RETURN_ON_FALSE(learning_activity_is_available(LEARNING_ACTIVITY_THREE_INPUT_CARRY_LEVEL_ID),
+                        ESP_FAIL, TAG, "three input carry activity should be available");
     ESP_RETURN_ON_FALSE(learning_activity_is_available(LEARNING_ACTIVITY_FULL_ADDER_LEVEL_ID),
                         ESP_FAIL, TAG, "full adder activity should be available");
     ESP_RETURN_ON_FALSE(!learning_activity_is_available(402U), ESP_FAIL, TAG,
@@ -349,6 +367,42 @@ esp_err_t learning_activity_self_test_run(void)
     ESP_RETURN_ON_FALSE(learning_activity_get_state(&state) && state.bits == 0x7U &&
                             state.current_decimal == 3U && state.complete,
                         ESP_FAIL, TAG, "three inputs should complete odd parity training");
+    learning_activity_stop();
+
+    ESP_RETURN_ON_FALSE(learning_activity_begin(LEARNING_ACTIVITY_THREE_INPUT_CARRY_LEVEL_ID), ESP_FAIL,
+                        TAG, "three input carry activity start failed");
+    ESP_RETURN_ON_FALSE(learning_activity_get_state(&state) &&
+                            state.kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_CARRY &&
+                            state.target_bits == 0x4U && state.target_decimal == 0U,
+                        ESP_FAIL, TAG, "three input carry first pattern mismatch");
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.slots[6U].present = true;
+    learning_activity_update_snapshot(&snapshot);
+    ESP_RETURN_ON_FALSE(learning_activity_get_state(&state) && state.current_decimal == 1U &&
+                            state.solved,
+                        ESP_FAIL, TAG, "one input should complete the no-carry round");
+    ESP_RETURN_ON_FALSE(learning_activity_advance(), ESP_FAIL, TAG,
+                        "three input carry first advance failed");
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.slots[6U].present = true;
+    snapshot.slots[7U].present = true;
+    learning_activity_update_snapshot(&snapshot);
+    ESP_RETURN_ON_FALSE(learning_activity_get_state(&state) && state.current_decimal == 2U &&
+                            state.target_decimal == 1U && state.solved,
+                        ESP_FAIL, TAG, "two inputs should complete the carry round");
+    ESP_RETURN_ON_FALSE(learning_activity_advance(), ESP_FAIL, TAG,
+                        "three input carry second advance failed");
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.slots[6U].present = true;
+    snapshot.slots[7U].present = true;
+    snapshot.slots[8U].present = true;
+    learning_activity_update_snapshot(&snapshot);
+    ESP_RETURN_ON_FALSE(learning_activity_get_state(&state) && state.current_decimal == 3U &&
+                            state.target_decimal == 1U && state.complete,
+                        ESP_FAIL, TAG, "three inputs should complete the carry training");
     learning_activity_stop();
 
     ESP_RETURN_ON_FALSE(learning_activity_begin(LEARNING_ACTIVITY_HALF_ADDER_LEVEL_ID), ESP_FAIL,
@@ -435,6 +489,6 @@ esp_err_t learning_activity_self_test_run(void)
                             state.complete,
                         ESP_FAIL, TAG, "full adder 1 plus 1 plus 1 pattern mismatch");
     learning_activity_stop();
-    ESP_LOGI(TAG, "binary, half adder, three input parity, and full adder activity self-tests passed");
+    ESP_LOGI(TAG, "binary, half adder, three input parity, three input carry, and full adder activity self-tests passed");
     return ESP_OK;
 }

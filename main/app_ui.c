@@ -1578,8 +1578,10 @@ static void ui_refresh_learning_activity(void)
 
     const bool is_half_adder = state.kind == LEARNING_ACTIVITY_KIND_HALF_ADDER;
     const bool is_three_input_parity = state.kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY;
+    const bool is_three_input_carry = state.kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_CARRY;
+    const bool is_three_input = is_three_input_parity || is_three_input_carry;
     const bool is_full_adder = state.kind == LEARNING_ACTIVITY_KIND_FULL_ADDER;
-    const bool is_adder = is_half_adder || is_three_input_parity || is_full_adder;
+    const bool is_adder = is_half_adder || is_three_input || is_full_adder;
     static const int32_t binary_cell_x[LEARNING_ACTIVITY_MAX_SLOT_COUNT] = {34, 244, 454, 664, 0};
     static const int32_t binary_cell_y[LEARNING_ACTIVITY_MAX_SLOT_COUNT] = {180, 180, 180, 180, 0};
     static const int32_t half_adder_cell_x[LEARNING_ACTIVITY_MAX_SLOT_COUNT] = {34, 34, 454, 454, 0};
@@ -1646,6 +1648,32 @@ static void ui_refresh_learning_activity(void)
                               ui_learning_bit(state.bits, state.slot_count, 2U),
                               (unsigned)state.current_decimal,
                               (unsigned)(state.current_decimal & 1U));
+    } else if (is_three_input_carry) {
+        const uint8_t target_count = (uint8_t)__builtin_popcount((unsigned)state.target_bits);
+        lv_label_set_text_fmt(s_ui.learning_round, "进位训练  %u / %u",
+                              (unsigned)(state.round_index + 1U), (unsigned)state.round_total);
+        lv_label_set_text_fmt(s_ui.learning_title, "放好 %u 个 1，看看进位",
+                              (unsigned)target_count);
+        switch (state.round_index) {
+        case 0U:
+            lv_label_set_text(s_ui.learning_instruction,
+                              "先放 1 块积木。只有一个 1 时，个位装得下，所以进位是 0。\n");
+            break;
+        case 1U:
+            lv_label_set_text(s_ui.learning_instruction,
+                              "这次放 2 块积木。两个 1 相加后多出一个 1，要送到下一位。\n");
+            break;
+        default:
+            lv_label_set_text(s_ui.learning_instruction,
+                              "最后放 3 块积木。现在有三个 1，进位为 1。\n");
+            break;
+        }
+        lv_label_set_text_fmt(s_ui.learning_readout, "当前：A=%u  B=%u  进位输入=%u  |  有 %u 个 1，进位=%u",
+                              ui_learning_bit(state.bits, state.slot_count, 0U),
+                              ui_learning_bit(state.bits, state.slot_count, 1U),
+                              ui_learning_bit(state.bits, state.slot_count, 2U),
+                              (unsigned)state.current_decimal,
+                              state.current_decimal >= 2U ? 1U : 0U);
     } else {
         lv_label_set_text_fmt(s_ui.learning_round, "二进制训练  %u / %u",
                               (unsigned)(state.round_index + 1U), (unsigned)state.round_total);
@@ -1678,12 +1706,21 @@ static void ui_refresh_learning_activity(void)
                           is_full_adder ? "训练完成！全加器会处理三个输入，并给出个位和进位。中键开始组装。" :
                           is_half_adder ? "训练完成！半加器会同时给出个位和进位。中键开始组装。" :
                           is_three_input_parity ? "训练完成！有奇数个 1 时，个位就是 1。中键开始组装。" :
+                          is_three_input_carry ? "训练完成！两个或三个 1 时，就要送出一个进位。中键开始组装。" :
                                           "训练完成！二进制 0010 就是十进制 2。中键开始组装。");
         ui_set_learning_controls("按住右键提问    中键开始组装");
     } else if (state.solved) {
-        if (is_adder) {
+        if (is_full_adder || is_half_adder) {
             lv_label_set_text_fmt(s_ui.learning_status, "答对啦！个位是 %u，进位是 %u。中键进入下一题。",
                                   (unsigned)target_sum, (unsigned)target_carry);
+        } else if (is_three_input_parity) {
+            lv_label_set_text_fmt(s_ui.learning_status, "答对啦！现在有 %u 个 1，个位是 %u。中键进入下一题。",
+                                  (unsigned)state.current_decimal,
+                                  (unsigned)(state.current_decimal & 1U));
+        } else if (is_three_input_carry) {
+            lv_label_set_text_fmt(s_ui.learning_status, "答对啦！现在有 %u 个 1，进位是 %u。中键进入下一题。",
+                                  (unsigned)state.current_decimal,
+                                  state.current_decimal >= 2U ? 1U : 0U);
         } else {
             lv_label_set_text(s_ui.learning_status, "答对啦！中键进入下一题。");
         }
@@ -1701,6 +1738,10 @@ static void ui_refresh_learning_activity(void)
             lv_label_set_text_fmt(s_ui.learning_status,
                                   "目标是让个位变成 %u。先数数左边有几个 1。",
                                   (unsigned)state.target_decimal);
+        } else if (is_three_input_carry) {
+            lv_label_set_text_fmt(s_ui.learning_status,
+                                  "目标是放 %u 个 1。先数数左边有几个积木。",
+                                  (unsigned)__builtin_popcount((unsigned)state.target_bits));
         } else {
             lv_label_set_text_fmt(s_ui.learning_status,
                                   "当前是 %u，目标是 %u。把积木放进最上方高亮行试试。",
@@ -1712,8 +1753,9 @@ static void ui_refresh_learning_activity(void)
                                 lv_color_hex(state.solved ? UI_COLOR_GREEN : UI_COLOR_MUTED), 0);
 
     if (is_adder) {
-        lv_label_set_text(s_ui.learning_column_titles[0], is_three_input_parity ? "三个输入" : "输入");
-        lv_label_set_text(s_ui.learning_column_titles[1], is_three_input_parity ? "个位结果" : "计算结果");
+        lv_label_set_text(s_ui.learning_column_titles[0], is_three_input ? "三个输入" : "输入");
+        lv_label_set_text(s_ui.learning_column_titles[1], is_three_input_parity ? "个位结果" :
+                          is_three_input_carry ? "进位结果" : "计算结果");
         lv_obj_clear_flag(s_ui.learning_column_titles[0], LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_ui.learning_column_titles[1], LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_pos(s_ui.learning_readout, 34, 350);
@@ -1744,12 +1786,12 @@ static void ui_refresh_learning_activity(void)
         lv_obj_set_pos(s_ui.learning_slots[column],
                        is_full_adder ? full_adder_cell_x[column] :
                            is_half_adder ? half_adder_cell_x[column] :
-                           is_three_input_parity ? parity_cell_x[column] : binary_cell_x[column],
+                           is_three_input ? parity_cell_x[column] : binary_cell_x[column],
                        is_full_adder ? full_adder_cell_y[column] :
                            is_half_adder ? half_adder_cell_y[column] :
-                           is_three_input_parity ? parity_cell_y[column] : binary_cell_y[column]);
+                           is_three_input ? parity_cell_y[column] : binary_cell_y[column]);
         lv_obj_set_size(s_ui.learning_slots[column], is_adder ? 396 : 190,
-                        is_full_adder ? 56 : is_half_adder ? 72 : is_three_input_parity ? 56 : 88);
+                        is_full_adder ? 56 : is_half_adder ? 72 : is_three_input ? 56 : 88);
         ui_style_learning_slot(s_ui.learning_slots[column], true, bit != 0U);
         if (is_full_adder) {
             lv_label_set_text_fmt(s_ui.learning_slot_labels[column], "%s\n%u",
@@ -1757,7 +1799,7 @@ static void ui_refresh_learning_activity(void)
         } else if (is_half_adder) {
             lv_label_set_text_fmt(s_ui.learning_slot_labels[column], "%s\n%u",
                                   half_adder_roles[column], (unsigned)bit);
-        } else if (is_three_input_parity) {
+        } else if (is_three_input) {
             static const char *parity_roles[LEARNING_ACTIVITY_THREE_INPUT_SLOT_COUNT] = {
                 "A", "B", "进位输入",
             };

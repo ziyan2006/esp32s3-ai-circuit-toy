@@ -99,20 +99,26 @@ static void c6_ip_event_handler(void *arg, esp_event_base_t base, int32_t id, vo
     (void)arg;
     (void)data;
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        esp_netif_dns_info_t primary_dns = {
-            .ip = ESP_IP4ADDR_INIT(223, 5, 5, 5),
-        };
-        esp_netif_dns_info_t backup_dns = {
-            .ip = ESP_IP4ADDR_INIT(119, 29, 29, 29),
-        };
         if (s_wifi_netif != NULL) {
-            const esp_err_t primary_err = esp_netif_set_dns_info(
+            esp_netif_dns_info_t primary_dns = {0};
+            esp_netif_dns_info_t backup_dns = {0};
+            esp_netif_dns_info_t fallback_dns = {
+                .ip = ESP_IP4ADDR_INIT(223, 5, 5, 5),
+            };
+            esp_netif_dns_info_t secondary_fallback_dns = {
+                .ip = ESP_IP4ADDR_INIT(119, 29, 29, 29),
+            };
+            const esp_err_t primary_err = esp_netif_get_dns_info(
                 s_wifi_netif, ESP_NETIF_DNS_MAIN, &primary_dns);
-            const esp_err_t backup_err = esp_netif_set_dns_info(
+            const esp_err_t backup_err = esp_netif_get_dns_info(
                 s_wifi_netif, ESP_NETIF_DNS_BACKUP, &backup_dns);
-            ESP_LOGI(TAG, "DNS configured primary=%s backup=%s result=%s/%s",
-                     "223.5.5.5", "119.29.29.29", esp_err_to_name(primary_err),
-                     esp_err_to_name(backup_err));
+            const esp_err_t fallback_err = esp_netif_set_dns_info(
+                s_wifi_netif, ESP_NETIF_DNS_FALLBACK, &fallback_dns);
+            const esp_err_t secondary_fallback_err = esp_netif_set_dns_info(
+                s_wifi_netif, ESP_NETIF_DNS_BACKUP, &secondary_fallback_dns);
+            ESP_LOGI(TAG, "Using DHCP DNS result=%s/%s, fallback=%s/%s",
+                     esp_err_to_name(primary_err), esp_err_to_name(backup_err),
+                     esp_err_to_name(fallback_err), esp_err_to_name(secondary_fallback_err));
         }
         xEventGroupSetBits(s_wifi_events, C6_WIFI_CONNECTED);
     }

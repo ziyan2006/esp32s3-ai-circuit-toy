@@ -28,6 +28,7 @@ static const char *TAG = "voice_assistant";
 #define MIN_AUDIO_BYTES 640U
 #define FRAME_BUFFER_LIMIT (64U * 1024U)
 #define REQUEST_TIMEOUT_MS 30000U
+#define AGENT_RESPONSE_TIMEOUT_MS 50000U
 #define UNCLEAR_REPLY "我没明白，换个说法试试。"
 #define THINKING_ANNOUNCEMENT "稍等，我思考一下"
 #define THINKING_CACHE_PARTITION_LABEL "thinking_cache"
@@ -911,7 +912,7 @@ static void voice_task(void *arg)
                 if (assistant_router_submit(s_final_text, s_level_id, &s_agent_request_id) != ESP_OK) {
                     report_error("对话服务不可用");
                 } else {
-                    s_agent_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(40000);
+                    s_agent_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(AGENT_RESPONSE_TIMEOUT_MS);
                     status_set(VOICE_ASSISTANT_THINKING, true, false, "思考中");
                     ESP_LOGI(TAG, "播放等待提示");
                     if (!start_cached_thinking_announcement()) {

@@ -19,6 +19,7 @@
 #define REMOTE_TEXT_MAX 512U
 #define REMOTE_REQUEST_TEXT_MAX 384U
 #define REMOTE_RESPONSE_MAX 2048U
+#define REMOTE_HTTP_TIMEOUT_MIN_MS 45000U
 #define REMOTE_TOOL_ONLY_REPLY "请看亮起的提示，再完成这一步。"
 
 static const char *TAG = "remote_assistant";
@@ -42,6 +43,7 @@ static const char *learning_activity_kind_name(learning_activity_kind_t kind)
     case LEARNING_ACTIVITY_KIND_BINARY_SLOTS: return "binary_slots";
     case LEARNING_ACTIVITY_KIND_HALF_ADDER: return "half_adder";
     case LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY: return "three_input_parity";
+    case LEARNING_ACTIVITY_KIND_THREE_INPUT_CARRY: return "three_input_carry";
     case LEARNING_ACTIVITY_KIND_FULL_ADDER: return "full_adder";
     default: return NULL;
     }
@@ -67,7 +69,9 @@ static cJSON *create_learning_activity_json(const learning_activity_state_t *sta
     static const uint8_t binary_weights[] = {8U, 4U, 2U, 1U};
     const char *const *roles = state->kind == LEARNING_ACTIVITY_KIND_BINARY_SLOTS ? binary_roles :
                                state->kind == LEARNING_ACTIVITY_KIND_HALF_ADDER ? half_adder_roles :
-                               state->kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY ? three_input_parity_roles :
+                               (state->kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY ||
+                                state->kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_CARRY) ?
+                                   three_input_parity_roles :
                                state->kind == LEARNING_ACTIVITY_KIND_FULL_ADDER ? full_adder_roles : NULL;
     const char *kind = learning_activity_kind_name(state->kind);
     if (roles == NULL || kind == NULL || state->slot_count == 0U) return NULL;
@@ -92,7 +96,8 @@ static cJSON *create_learning_activity_json(const learning_activity_state_t *sta
         }
         cJSON_AddNumberToObject(activity, "target_decimal", state->target_decimal);
         cJSON_AddNumberToObject(activity, "current_decimal", state->current_decimal);
-    } else if (state->kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY) {
+    } else if (state->kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_PARITY ||
+               state->kind == LEARNING_ACTIVITY_KIND_THREE_INPUT_CARRY) {
         cJSON_AddNumberToObject(activity, "target_decimal", state->target_decimal);
         cJSON_AddNumberToObject(activity, "current_decimal", state->current_decimal);
     }
@@ -140,10 +145,13 @@ static esp_err_t request_remote(const remote_request_t *request, char *out, size
     cJSON_Delete(root);
     if (body == NULL) return ESP_ERR_NO_MEM;
 
+    const int timeout_ms = CONFIG_TUCO_REMOTE_ASSISTANT_TIMEOUT_MS < REMOTE_HTTP_TIMEOUT_MIN_MS ?
+        REMOTE_HTTP_TIMEOUT_MIN_MS : CONFIG_TUCO_REMOTE_ASSISTANT_TIMEOUT_MS;
+    ESP_LOGI(TAG, "request=%lu POST timeout=%dms", (unsigned long)request->id, timeout_ms);
     esp_http_client_config_t config = {
         .url = CONFIG_TUCO_REMOTE_ASSISTANT_URL,
         .method = HTTP_METHOD_POST,
-        .timeout_ms = CONFIG_TUCO_REMOTE_ASSISTANT_TIMEOUT_MS,
+        .timeout_ms = timeout_ms,
         .buffer_size = 1024,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
@@ -153,7 +161,12 @@ static esp_err_t request_remote(const remote_request_t *request, char *out, size
     err = esp_http_client_open(client, strlen(body));
     if (err == ESP_OK && esp_http_client_write(client, body, strlen(body)) < 0) err = ESP_FAIL;
     cJSON_free(body);
-    if (err != ESP_OK) { esp_http_client_cleanup(client); return err; }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "request=%lu HTTP open/write failed: %s",
+                 (unsigned long)request->id, esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return err;
+    }
     (void)esp_http_client_fetch_headers(client);
     const int status = esp_http_client_get_status_code(client);
     char response[REMOTE_RESPONSE_MAX] = {0};
@@ -165,6 +178,7 @@ static esp_err_t request_remote(const remote_request_t *request, char *out, size
     }
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+    ESP_LOGI(TAG, "request=%lu HTTP status=%d bytes=%d", (unsigned long)request->id, status, total);
     if (status < 200 || status >= 300 || total == 0) return ESP_FAIL;
 
     cJSON *reply = cJSON_Parse(response);
