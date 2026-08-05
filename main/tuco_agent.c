@@ -258,6 +258,7 @@ static esp_err_t build_circuit_context(const board_snapshot_t *snapshot,
     level = cJSON_AddObjectToObject(root, "level");
     if (level == NULL) goto no_mem;
     cJSON_AddNumberToObject(level, "id", level_id);
+    cJSON_AddNumberToObject(level, "rule_version", rule ? rule->rule_version : 0U);
     cJSON_AddStringToObject(level, "goal", rule ? rule->short_goal : "unknown");
     cJSON_AddStringToObject(level, "inputs", rule ? rule->input_names : "");
     cJSON_AddStringToObject(level, "outputs", rule ? rule->output_names : "");
@@ -372,6 +373,7 @@ esp_err_t tuco_agent_context_self_test_run(void)
                         "serialize direct circuit context");
     const bool basic_ok =
         strstr(context, "\"schema\":\"tuco_circuit_v2\"") != NULL &&
+        strstr(context, "\"rule_version\":1") != NULL &&
         strstr(context, "\"unlocked_gates\":[\"INPUT\",\"OUTPUT\"") != NULL &&
         strstr(context, "\"slots\":[[0,0,3,\"present\",\"INPUT\"") != NULL &&
         strstr(context, "[0,\"right\",\"output\"]") != NULL &&
