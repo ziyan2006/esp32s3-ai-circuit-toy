@@ -24,6 +24,7 @@
 #include "block_i2c.h"
 #include "audio_self_test.h"
 #include "assistant_diagnostics.h"
+#include "assistant_error_latch.h"
 #include "assistant_mode.h"
 #include "assistant_router.h"
 #include "remote_assistant.h"
@@ -510,6 +511,7 @@ void app_main(void)
     ESP_ERROR_CHECK(level_intro_self_test_run());
     ESP_ERROR_CHECK(learning_activity_self_test_run());
     ESP_ERROR_CHECK(assistant_diagnostics_self_test_run());
+    ESP_ERROR_CHECK(assistant_error_latch_self_test_run());
     ESP_ERROR_CHECK(assistant_mode_self_test_run());
     ESP_ERROR_CHECK(tuco_agent_context_self_test_run());
     ESP_ERROR_CHECK(run_shooter_self_tests());
@@ -530,6 +532,7 @@ void app_main(void)
     tuco_agent_serial_start();
     ESP_ERROR_CHECK(voice_assistant_init());
     ESP_ERROR_CHECK(voice_assistant_gameplay_prompt_self_test_run());
+    ESP_ERROR_CHECK(voice_assistant_diagnostics_self_test_run());
     ESP_ERROR_CHECK(block_i2c_init());
 
     s_input_state_queue = xQueueCreate(1, sizeof(input_state_t));

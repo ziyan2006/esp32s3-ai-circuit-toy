@@ -1,8 +1,11 @@
 #include "assistant_router.h"
 
 #include <stdbool.h>
+#include <string.h>
 
+#include "assistant_diagnostics.h"
 #include "assistant_mode.h"
+#include "esp_check.h"
 #include "esp_log.h"
 #include "remote_assistant.h"
 #include "tuco_agent.h"
@@ -80,11 +83,32 @@ esp_err_t assistant_router_submit(const char *text, uint16_t level_id, uint32_t 
     return err;
 }
 
-esp_err_t assistant_router_take_result(uint32_t request_id, char *output, size_t output_size)
+esp_err_t assistant_router_take_response(uint32_t request_id,
+                                         assistant_response_t *out_response)
 {
-    const esp_err_t err = s_active_mode == ASSISTANT_MODE_REMOTE ?
-        remote_assistant_take_result(request_id, output, output_size) :
-        tuco_agent_take_result(request_id, output, output_size);
+    if (out_response == NULL || request_id == 0U) return ESP_ERR_INVALID_ARG;
+    esp_err_t err;
+    if (s_active_mode == ASSISTANT_MODE_REMOTE) {
+        err = remote_assistant_take_response(request_id, out_response);
+    } else {
+        char text[sizeof(out_response->text)] = {0};
+        err = tuco_agent_take_result(request_id, text, sizeof(text));
+        if (err == ESP_ERR_NOT_FOUND) return err;
+        assistant_response_reset(out_response, request_id);
+        if (err == ESP_OK && text[0] != '\0') {
+            strlcpy(out_response->text, text, sizeof(out_response->text));
+        } else if (err == ESP_OK) {
+            assistant_response_fail(out_response, ASSISTANT_ERROR_EMPTY_RESPONSE,
+                                    ASSISTANT_STAGE_BACKEND_PROTOCOL,
+                                    ESP_ERR_INVALID_RESPONSE, 0, true,
+                                    "local assistant returned empty text");
+        } else {
+            assistant_response_fail(out_response, ASSISTANT_ERROR_CONNECT_FAILED,
+                                    ASSISTANT_STAGE_BACKEND_CONNECT,
+                                    err, 0, true, esp_err_to_name(err));
+        }
+        err = ESP_OK;
+    }
     if (err != ESP_ERR_NOT_FOUND && request_id == s_active_request_id) s_active_request_id = 0U;
     return err;
 }
@@ -99,7 +123,19 @@ void assistant_router_cancel(uint32_t request_id)
 esp_err_t assistant_router_self_test_run(void)
 {
     const assistant_mode_t mode = assistant_mode_get();
-    if (mode != ASSISTANT_MODE_LOCAL && mode != ASSISTANT_MODE_REMOTE) return ESP_FAIL;
+    ESP_RETURN_ON_FALSE(mode == ASSISTANT_MODE_LOCAL || mode == ASSISTANT_MODE_REMOTE,
+                        ESP_FAIL, TAG, "invalid assistant mode");
+    assistant_response_t response;
+    assistant_response_reset(&response, 7U);
+    ESP_RETURN_ON_FALSE(response.request_id == 7U &&
+                            response.error_code == ASSISTANT_ERROR_NONE,
+                        ESP_FAIL, TAG, "response initialization");
+    assistant_response_fail(&response, ASSISTANT_ERROR_EMPTY_RESPONSE,
+                            ASSISTANT_STAGE_BACKEND_PROTOCOL,
+                            ESP_ERR_INVALID_RESPONSE, 0, true, "empty");
+    ESP_RETURN_ON_FALSE(response.error_code != ASSISTANT_ERROR_NONE &&
+                            response.text[0] == '\0',
+                        ESP_FAIL, TAG, "error response classification");
     ESP_LOGI(TAG, "assistant router self-test passed");
     return ESP_OK;
 }

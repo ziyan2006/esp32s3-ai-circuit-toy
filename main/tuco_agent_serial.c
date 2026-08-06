@@ -47,12 +47,18 @@ static void serial_agent_task(void *arg)
             }
             ESP_LOGI(TAG, "serial request=%lu submitted", (unsigned long)request_id);
             const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(50000);
-            char reply[512];
             for (;;) {
-                const esp_err_t result = assistant_router_take_result(request_id, reply, sizeof(reply));
+                assistant_response_t response;
+                const esp_err_t result = assistant_router_take_response(request_id, &response);
                 if (result != ESP_ERR_NOT_FOUND) {
-                    ESP_LOGI(TAG, "serial reply request=%lu result=%s text=%s",
-                             (unsigned long)request_id, esp_err_to_name(result), reply);
+                    ESP_LOGI(TAG,
+                             "serial reply request=%lu result=%s code=%d stage=%s trace_id=%s text=%s detail=%s",
+                             (unsigned long)request_id, esp_err_to_name(result),
+                             result == ESP_OK ? response.error_code : -1,
+                             result == ESP_OK ? assistant_stage_name(response.stage) : "interface",
+                             result == ESP_OK ? response.trace_id : "",
+                             result == ESP_OK ? response.text : "",
+                             result == ESP_OK ? response.detail : "");
                     break;
                 }
                 if (xTaskGetTickCount() >= deadline) {

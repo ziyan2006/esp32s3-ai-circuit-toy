@@ -5,10 +5,13 @@
 #include <string.h>
 
 #include "audio_self_test.h"
+#include "assistant_diagnostics.h"
+#include "assistant_error_latch.h"
 #include "assistant_mode.h"
 #include "assistant_router.h"
 #include "c6_network_test.h"
 #include "esp_crt_bundle.h"
+#include "esp_check.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_random.h"
@@ -29,6 +32,7 @@ static const char *TAG = "voice_assistant";
 #define FRAME_BUFFER_LIMIT (64U * 1024U)
 #define REQUEST_TIMEOUT_MS 30000U
 #define AGENT_RESPONSE_TIMEOUT_MS 50000U
+#define ERROR_MINIMUM_VISIBLE_MS 6000U
 #define UNCLEAR_REPLY "我没明白，换个说法试试。"
 #define THINKING_ANNOUNCEMENT "稍等，我思考一下"
 #define THINKING_CACHE_PARTITION_LABEL "thinking_cache"
@@ -99,7 +103,11 @@ static bool s_agent_reply_ready;
 static tts_kind_t s_tts_kind;
 static size_t s_tts_text_offset;
 static char s_request_id[37];
-static char s_error_reason[48];
+static assistant_error_latch_t s_error_latch;
+static assistant_error_code_t s_pending_error_code;
+static assistant_stage_t s_pending_error_stage;
+static esp_err_t s_pending_esp_error;
+static char s_pending_error_detail[96];
 static volatile bool s_gameplay_prompt_pending;
 static voice_gameplay_prompt_t s_pending_gameplay_prompt;
 static const esp_partition_t *s_thinking_cache_partition;
@@ -110,7 +118,13 @@ static uint32_t s_thinking_cache_checksum;
 static bool s_cached_thinking_playback;
 static uint32_t s_cached_thinking_offset;
 
-static void status_set(voice_assistant_state_t state, bool visible, bool error, const char *text);
+static void status_publish(voice_assistant_state_t state, bool visible, bool error,
+                           const char *text, bool force);
+
+static uint32_t voice_now_ms(void)
+{
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
 
 static uint32_t thinking_cache_checksum_update(uint32_t checksum, const uint8_t *data, size_t length)
 {
@@ -237,7 +251,7 @@ static bool start_cached_thinking_announcement(void)
     s_cached_thinking_offset = 0U;
     s_playback_finishing = false;
     s_phase = VOICE_TTS;
-    status_set(VOICE_ASSISTANT_PLAYING, true, false, "播放中");
+    status_publish(VOICE_ASSISTANT_PLAYING, true, false, "播放中", false);
     ESP_LOGI(TAG, "playing local thinking prompt cache");
     return true;
 }
@@ -294,12 +308,22 @@ static void start_unclear_reply(void)
 {
     cancel_pending_agent();
     start_tts_text(UNCLEAR_REPLY, TTS_KIND_AGENT_REPLY);
-    status_set(VOICE_ASSISTANT_THINKING, true, false, "播放中");
+    status_publish(VOICE_ASSISTANT_THINKING, true, false, "播放中", false);
 }
 
-static void status_set(voice_assistant_state_t state, bool visible, bool error, const char *text)
+static void status_publish(voice_assistant_state_t state, bool visible, bool error,
+                           const char *text, bool force)
 {
+    const uint32_t now_ms = voice_now_ms();
     portENTER_CRITICAL(&s_lock);
+    if (!force && assistant_error_latch_blocks_status(&s_error_latch, now_ms)) {
+        portEXIT_CRITICAL(&s_lock);
+        return;
+    }
+    if (!assistant_error_latch_blocks_status(&s_error_latch, now_ms) &&
+        s_error_latch.active) {
+        assistant_error_latch_reset(&s_error_latch);
+    }
     const bool changed = s_status.state != state || s_status.visible != visible ||
                          s_status.error != error || strcmp(s_status.text, text) != 0;
     s_status.state = state;
@@ -550,9 +574,17 @@ static void clear_client(void)
     }
 }
 
-static void report_error(const char *text)
+static void report_assistant_error(assistant_error_code_t code,
+                                   assistant_stage_t stage,
+                                   esp_err_t esp_error,
+                                   const char *detail,
+                                   const char *trace_id)
 {
-    ESP_LOGE(TAG, "%s", text);
+    const char *display_text = assistant_error_display_text(code, stage);
+    ESP_LOGE(TAG,
+             "assistant error code=%d stage=%s esp_error=%s detail=%s trace_id=%s",
+             code, assistant_stage_name(stage), esp_err_to_name(esp_error),
+             detail == NULL ? "" : detail, trace_id == NULL ? "" : trace_id);
     cancel_pending_agent();
     audio_self_test_voice_capture_end();
     audio_self_test_voice_playback_abort();
@@ -562,42 +594,97 @@ static void report_error(const char *text)
     if (s_tts_kind == TTS_KIND_GAMEPLAY_PROMPT) {
         s_tts_kind = TTS_KIND_NONE;
         s_phase = VOICE_READY;
-        status_set(VOICE_ASSISTANT_READY, false, false, "");
+        status_publish(VOICE_ASSISTANT_READY, false, false, "", false);
         return;
     }
-    s_phase = VOICE_ERROR;
-    status_set(VOICE_ASSISTANT_ERROR, true, true, "失败");
+    s_phase = VOICE_READY;
+    portENTER_CRITICAL(&s_lock);
+    assistant_error_latch_raise(&s_error_latch, voice_now_ms(),
+                                ERROR_MINIMUM_VISIBLE_MS, code, stage,
+                                display_text);
+    portEXIT_CRITICAL(&s_lock);
+    status_publish(VOICE_ASSISTANT_ERROR, true, true, display_text, true);
 }
 
-static esp_err_t poll_agent_result(void)
+static void poll_agent_result(void)
 {
-    if (s_agent_request_id == 0U) return ESP_OK;
+    if (s_agent_request_id == 0U) return;
 
-    char reply[sizeof(s_agent_reply)] = {0};
-    const esp_err_t result = assistant_router_take_result(s_agent_request_id, reply, sizeof(reply));
-    if (result == ESP_OK) {
-        strlcpy(s_agent_reply, reply, sizeof(s_agent_reply));
+    assistant_response_t response;
+    const esp_err_t result = assistant_router_take_response(s_agent_request_id, &response);
+    if (result == ESP_OK && response.error_code == ASSISTANT_ERROR_NONE) {
+        strlcpy(s_agent_reply, response.text, sizeof(s_agent_reply));
         s_agent_request_id = 0U;
         s_agent_reply_ready = true;
-        ESP_LOGI(TAG, "Agent 回复: %s", s_agent_reply);
-        return ESP_OK;
+        ESP_LOGI(TAG, "Agent response request=%lu elapsed_ms=%lu trace_id=%s text=%s",
+                 (unsigned long)response.request_id,
+                 (unsigned long)response.elapsed_ms,
+                 response.trace_id, s_agent_reply);
+        return;
     }
-    if (result != ESP_ERR_NOT_FOUND) return result;
-    if (xTaskGetTickCount() < s_agent_deadline) return ESP_OK;
+    if (result == ESP_OK) {
+        s_agent_request_id = 0U;
+        report_assistant_error(response.error_code, response.stage,
+                               response.esp_error, response.detail,
+                               response.trace_id);
+        return;
+    }
+    if (result != ESP_ERR_NOT_FOUND) {
+        report_assistant_error(ASSISTANT_ERROR_CONNECT_FAILED,
+                               ASSISTANT_STAGE_BACKEND_CONNECT,
+                               result, "assistant router result failed", "");
+        return;
+    }
+    if (xTaskGetTickCount() < s_agent_deadline) return;
 
     cancel_pending_agent();
-    return ESP_ERR_TIMEOUT;
+    report_assistant_error(ASSISTANT_ERROR_REQUEST_TIMEOUT,
+                           ASSISTANT_STAGE_BACKEND_HTTP,
+                           ESP_ERR_TIMEOUT, "assistant response deadline", "");
 }
 
-static void callback_error(const char *reason)
+static void callback_error(assistant_error_code_t code,
+                           assistant_stage_t stage,
+                           esp_err_t esp_error,
+                           const char *detail)
 {
-    strlcpy(s_error_reason, reason, sizeof(s_error_reason));
+    portENTER_CRITICAL(&s_lock);
+    s_pending_error_code = code;
+    s_pending_error_stage = stage;
+    s_pending_esp_error = esp_error;
+    strlcpy(s_pending_error_detail, detail == NULL ? "" : detail,
+            sizeof(s_pending_error_detail));
     s_transport_error = true;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static bool take_callback_error(assistant_error_code_t *code,
+                                assistant_stage_t *stage,
+                                esp_err_t *esp_error,
+                                char *detail,
+                                size_t detail_size)
+{
+    bool available;
+    portENTER_CRITICAL(&s_lock);
+    available = s_transport_error;
+    if (available) {
+        *code = s_pending_error_code;
+        *stage = s_pending_error_stage;
+        *esp_error = s_pending_esp_error;
+        strlcpy(detail, s_pending_error_detail, detail_size);
+        s_transport_error = false;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return available;
 }
 
 static void parse_asr_frame(const uint8_t *data, size_t len)
 {
-    if (len < 8U) { callback_error("ASR 协议错误"); return; }
+    if (len < 8U) {
+        callback_error(ASSISTANT_ERROR_ASR_FAILED, ASSISTANT_STAGE_ASR_RESPONSE,
+                       ESP_ERR_INVALID_RESPONSE, "ASR frame is too short");
+        return;
+    }
     const size_t header = (data[0] & 0x0FU) * 4U;
     const uint8_t type = data[1] >> 4U; const uint8_t flags = data[1] & 0x0FU;
     const uint8_t serialization = data[2] >> 4U; const uint8_t compression = data[2] & 0x0FU;
@@ -613,14 +700,17 @@ static void parse_asr_frame(const uint8_t *data, size_t len)
     uint8_t *decoded = NULL;
     if (compression == 1U && payload_len > 0U) {
         if (!gzip_decompress(payload, payload_len, &decoded, &decoded_len)) {
-            callback_error("ASR 压缩帧错误");
+            callback_error(ASSISTANT_ERROR_ASR_FAILED, ASSISTANT_STAGE_ASR_RESPONSE,
+                           ESP_ERR_INVALID_RESPONSE, "ASR compressed frame is invalid");
             return;
         }
         payload = decoded;
     }
     if (code != 0U) {
         free(decoded); ESP_LOGE(TAG, "ASR 服务错误 code=%lu", (unsigned long)code);
-        callback_error("ASR 服务错误"); return;
+        callback_error(ASSISTANT_ERROR_ASR_FAILED, ASSISTANT_STAGE_ASR_RESPONSE,
+                       ESP_FAIL, "ASR service returned an error");
+        return;
     }
     if (serialization == 1U && decoded_len > 0U) {
         char *json = strndup((const char *)payload, decoded_len);
@@ -640,56 +730,97 @@ static void parse_asr_frame(const uint8_t *data, size_t len)
         ESP_LOGI(TAG, "识别文本: %s", s_final_text);
         s_agent_request_id = 0U;
         s_phase = VOICE_AGENT;
-        status_set(VOICE_ASSISTANT_THINKING, true, false, "思考中");
+        status_publish(VOICE_ASSISTANT_THINKING, true, false, "思考中", false);
     }
 }
 
 static void parse_tts_frame(const uint8_t *data, size_t len)
 {
-    if (len < 8U) { callback_error("TTS 协议错误"); return; }
+    if (len < 8U) {
+        callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                       ESP_ERR_INVALID_RESPONSE, "TTS frame is too short");
+        return;
+    }
     const size_t header = (data[0] & 0x0FU) * 4U;
     const uint8_t type = data[1] >> 4U;
     const uint8_t flags = data[1] & 0x0FU;
     size_t offset = header;
-    if (header > len) { callback_error("TTS 协议错误"); return; }
+    if (header > len) {
+        callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                       ESP_ERR_INVALID_RESPONSE, "TTS header is invalid");
+        return;
+    }
     if (type == 0x0FU) {
         if (offset + 4U <= len) ESP_LOGE(TAG, "TTS 服务错误 code=%lu", (unsigned long)read_be32(data + offset));
-        callback_error("TTS 服务错误"); return;
+        callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                       ESP_FAIL, "TTS service returned an error");
+        return;
     }
     if ((flags == 1U || flags == 3U) && offset + 4U <= len) offset += 4U;
     uint32_t event = 0U;
     if (flags == 4U) {
-        if (offset + 4U > len) { callback_error("TTS 协议错误"); return; }
+        if (offset + 4U > len) {
+            callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                           ESP_ERR_INVALID_RESPONSE, "TTS event header is invalid");
+            return;
+        }
         event = read_be32(data + offset); offset += 4U;
         const bool connection_event = event == 50U || event == 51U || event == 52U;
         if (!connection_event) {
-            if (offset + 4U > len) { callback_error("TTS 协议错误"); return; }
+            if (offset + 4U > len) {
+                callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                               ESP_ERR_INVALID_RESPONSE, "TTS session header is invalid");
+                return;
+            }
             const uint32_t session_len = read_be32(data + offset); offset += 4U;
-            if (session_len > len - offset) { callback_error("TTS 协议错误"); return; }
+            if (session_len > len - offset) {
+                callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                               ESP_ERR_INVALID_RESPONSE, "TTS session id is invalid");
+                return;
+            }
             offset += session_len;
         }
         if (connection_event && offset + 4U <= len) {
             const uint32_t connect_len = read_be32(data + offset); offset += 4U;
-            if (connect_len > len - offset) { callback_error("TTS 协议错误"); return; }
+            if (connect_len > len - offset) {
+                callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                               ESP_ERR_INVALID_RESPONSE, "TTS connection id is invalid");
+                return;
+            }
             offset += connect_len;
         }
     }
-    if (offset + 4U > len) { callback_error("TTS 协议错误"); return; }
+    if (offset + 4U > len) {
+        callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                       ESP_ERR_INVALID_RESPONSE, "TTS payload header is invalid");
+        return;
+    }
     const uint32_t payload_len = read_be32(data + offset); offset += 4U;
-    if (payload_len > len - offset) { callback_error("TTS 协议错误"); return; }
+    if (payload_len > len - offset) {
+        callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                       ESP_ERR_INVALID_RESPONSE, "TTS payload length is invalid");
+        return;
+    }
     ESP_LOGI(TAG, "TTS 帧 type=%u flags=%u event=%lu payload=%lu",
              (unsigned)type, (unsigned)flags, (unsigned long)event, (unsigned long)payload_len);
     if (type == 0x0BU) {
         if (payload_len == 0U) return;
         if (!s_tts_started) {
-            if (audio_self_test_voice_playback_begin() != ESP_OK) { callback_error("播放缓冲失败"); return; }
-            s_tts_started = true; status_set(VOICE_ASSISTANT_PLAYING, true, false, "播放中");
+            if (audio_self_test_voice_playback_begin() != ESP_OK) {
+                callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_PLAYBACK,
+                               ESP_FAIL, "audio playback begin failed");
+                return;
+            }
+            s_tts_started = true;
+            status_publish(VOICE_ASSISTANT_PLAYING, true, false, "播放中", false);
         }
         if (s_tts_kind == TTS_KIND_THINKING_ANNOUNCEMENT) {
             thinking_cache_append(data + offset, payload_len);
         }
         if (audio_self_test_voice_playback_push(data + offset, payload_len, pdMS_TO_TICKS(1000)) != ESP_OK) {
-            callback_error("播放缓冲失败"); return;
+            callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_PLAYBACK,
+                           ESP_FAIL, "audio playback push failed");
+            return;
         }
         s_tts_audio_received = true;
         s_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(REQUEST_TIMEOUT_MS);
@@ -697,14 +828,22 @@ static void parse_tts_frame(const uint8_t *data, size_t len)
     }
     if (type != 0x09U || flags != 4U) return;
     if (event == 50U) {
-        if (send_tts_start_session() != ESP_OK) callback_error("TTS 会话创建失败");
+        if (send_tts_start_session() != ESP_OK) {
+            callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                           ESP_FAIL, "TTS start session failed");
+        }
     } else if (event == 150U) {
         s_tts_session_started = true;
         s_tts_next_request = xTaskGetTickCount();
     } else if (event == 51U || event == 153U) {
-        callback_error("TTS 服务错误");
+        callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                       ESP_FAIL, "TTS service event failed");
     } else if (event == 152U || event == 359U) {
-        if (!s_tts_audio_received) { callback_error("TTS 没有返回音频"); return; }
+        if (!s_tts_audio_received) {
+            callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                           ESP_ERR_INVALID_RESPONSE, "TTS returned no audio");
+            return;
+        }
         if (s_tts_kind == TTS_KIND_THINKING_ANNOUNCEMENT) thinking_cache_finish_capture();
         s_tts_finished = true;
     }
@@ -717,16 +856,26 @@ static void websocket_handler(void *args, esp_event_base_t base, int32_t event_i
     esp_websocket_event_data_t *event = (esp_websocket_event_data_t *)event_data;
     if (event_id == WEBSOCKET_EVENT_CONNECTED) {
         s_connected = true; s_transport_error = false;
-        if (s_mode == CLOUD_ASR && send_asr_start() != ESP_OK) callback_error("ASR 请求发送失败");
+        if (s_mode == CLOUD_ASR && send_asr_start() != ESP_OK) {
+            callback_error(ASSISTANT_ERROR_ASR_FAILED, ASSISTANT_STAGE_ASR_STREAM,
+                           ESP_FAIL, "ASR start request failed");
+        }
         if (s_mode == CLOUD_TTS) {
             uuid(s_request_id);
-            if (send_tts_event(1U, false, "{}") != ESP_OK) callback_error("TTS 请求发送失败");
+            if (send_tts_event(1U, false, "{}") != ESP_OK) {
+                callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                               ESP_FAIL, "TTS connect request failed");
+            }
         }
         xSemaphoreGive(s_event_sem); return;
     }
     if (event_id == WEBSOCKET_EVENT_ERROR) {
         s_handshake_status = event == NULL ? 0 : event->error_handle.esp_ws_handshake_status_code;
-        callback_error(s_handshake_status == 401 || s_handshake_status == 403 ? "云端服务未授权" : "云端连接失败");
+        callback_error(s_mode == CLOUD_ASR ? ASSISTANT_ERROR_ASR_FAILED : ASSISTANT_ERROR_TTS_FAILED,
+                       s_mode == CLOUD_ASR ? ASSISTANT_STAGE_ASR_CONNECT : ASSISTANT_STAGE_TTS_CONNECT,
+                       ESP_FAIL,
+                       s_handshake_status == 401 || s_handshake_status == 403 ?
+                           "cloud service unauthorized" : "cloud connection failed");
         xSemaphoreGive(s_event_sem); return;
     }
     if (event_id == WEBSOCKET_EVENT_DISCONNECTED || event_id == WEBSOCKET_EVENT_CLOSED) {
@@ -800,7 +949,7 @@ static void voice_task(void *arg)
     for (;;) {
         if (!tts_configured()) {
             s_gameplay_prompt_pending = false;
-            status_set(VOICE_ASSISTANT_DISABLED, false, false, "");
+            status_publish(VOICE_ASSISTANT_DISABLED, false, false, "", false);
             vTaskDelay(pdMS_TO_TICKS(250));
             continue;
         }
@@ -814,7 +963,7 @@ static void voice_task(void *arg)
                 s_thinking_cache_capturing = false;
                 clear_client();
                 s_phase = VOICE_READY;
-                status_set(VOICE_ASSISTANT_READY, false, false, "");
+                status_publish(VOICE_ASSISTANT_READY, false, false, "", false);
             }
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
@@ -822,28 +971,38 @@ static void voice_task(void *arg)
         if (!c6_network_is_connected()) {
             s_gameplay_prompt_pending = false;
             const bool gameplay_prompt_active = s_tts_kind == TTS_KIND_GAMEPLAY_PROMPT;
+            const bool manual_flow_active = s_phase != VOICE_READY && !gameplay_prompt_active;
             if (s_phase != VOICE_READY) {
                 cancel_pending_agent();
                 audio_self_test_voice_capture_end(); audio_self_test_voice_playback_abort();
                 s_cached_thinking_playback = false; s_thinking_cache_capturing = false;
-                clear_client(); s_phase = VOICE_ERROR;
+                clear_client(); s_phase = VOICE_READY;
             }
             if (gameplay_prompt_active) {
                 s_tts_kind = TTS_KIND_NONE;
                 s_phase = VOICE_READY;
-                status_set(VOICE_ASSISTANT_READY, false, false, "");
-            } else if (s_play_active && s_key_pressed && manual_voice_configured()) {
-                status_set(VOICE_ASSISTANT_ERROR, true, true, "失败");
+                status_publish(VOICE_ASSISTANT_READY, false, false, "", false);
+            } else if (manual_flow_active ||
+                       (s_play_active && s_key_pressed && manual_voice_configured() &&
+                        s_consumed_press_id != s_press_id)) {
+                if (s_key_pressed) s_consumed_press_id = s_press_id;
+                report_assistant_error(ASSISTANT_ERROR_NETWORK_OFFLINE,
+                                       ASSISTANT_STAGE_NETWORK,
+                                       ESP_ERR_INVALID_STATE,
+                                       "Wi-Fi is not connected", "");
             }
             vTaskDelay(pdMS_TO_TICKS(100)); continue;
         }
-        if (s_phase == VOICE_ERROR && !s_key_pressed) { s_phase = VOICE_READY; status_set(VOICE_ASSISTANT_READY, false, false, ""); }
         const bool request_recording = s_play_active && !s_programmer_owns_input && s_key_pressed &&
                                        manual_voice_configured();
-        if (s_transport_error) {
-            const char *reason = s_error_reason[0] == '\0' ? "云端连接失败" : s_error_reason;
-            s_transport_error = false;
-            report_error(reason);
+        assistant_error_code_t callback_code;
+        assistant_stage_t callback_stage;
+        esp_err_t callback_esp_error;
+        char callback_detail[96];
+        if (take_callback_error(&callback_code, &callback_stage, &callback_esp_error,
+                                callback_detail, sizeof(callback_detail))) {
+            report_assistant_error(callback_code, callback_stage, callback_esp_error,
+                                   callback_detail, "");
         }
         if (request_recording && (s_phase == VOICE_TTS || s_phase == VOICE_AGENT || s_phase == VOICE_WAIT_AGENT)) {
             cancel_pending_agent();
@@ -856,11 +1015,22 @@ static void voice_task(void *arg)
             s_consumed_press_id = s_press_id; s_audio_bytes = 0; s_sequence = 2; s_final_text[0] = '\0';
             s_final_sent = false; s_capture_ended = false; cancel_pending_agent(); s_tts_kind = TTS_KIND_NONE;
             s_tts_text[0] = '\0'; s_agent_reply[0] = '\0';
-            if (audio_self_test_voice_capture_begin() != ESP_OK || open_cloud(CLOUD_ASR) != ESP_OK) { report_error("语音连接失败"); }
-            else {
+            const esp_err_t capture_err = audio_self_test_voice_capture_begin();
+            if (capture_err != ESP_OK) {
+                report_assistant_error(ASSISTANT_ERROR_ASR_FAILED,
+                                       ASSISTANT_STAGE_ASR_STREAM,
+                                       capture_err, "audio capture begin failed", "");
+            } else {
+                const esp_err_t open_err = open_cloud(CLOUD_ASR);
+                if (open_err != ESP_OK) {
+                    report_assistant_error(ASSISTANT_ERROR_ASR_FAILED,
+                                           ASSISTANT_STAGE_ASR_CONNECT,
+                                           open_err, "ASR websocket open failed", "");
+                } else {
                 s_phase = VOICE_RECORDING;
                 s_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(MAX_RECORDING_MS);
-                status_set(VOICE_ASSISTANT_RECORDING, true, false, "录音中");
+                    status_publish(VOICE_ASSISTANT_RECORDING, true, false, "录音中", false);
+                }
             }
         }
         if (!request_recording && s_phase == VOICE_READY && s_gameplay_prompt_pending) {
@@ -869,7 +1039,7 @@ static void voice_task(void *arg)
             const char *text = gameplay_prompt_text(prompt);
             if (text != NULL) {
                 start_tts_text(text, TTS_KIND_GAMEPLAY_PROMPT);
-                status_set(VOICE_ASSISTANT_PLAYING, true, false, text);
+                status_publish(VOICE_ASSISTANT_PLAYING, true, false, text, false);
                 ESP_LOGI(TAG, "gameplay prompt=%u", (unsigned)prompt);
             }
         }
@@ -877,16 +1047,22 @@ static void voice_task(void *arg)
             (!request_recording || xTaskGetTickCount() >= s_deadline)) {
             audio_self_test_voice_capture_end();
             s_capture_ended = true;
-            status_set(VOICE_ASSISTANT_THINKING, true, false, "识别中");
+            status_publish(VOICE_ASSISTANT_THINKING, true, false, "识别中", false);
         }
         if (s_phase == VOICE_RECORDING && !s_connected && xTaskGetTickCount() >= s_deadline) {
-            report_error("ASR 连接超时");
+            report_assistant_error(ASSISTANT_ERROR_REQUEST_TIMEOUT,
+                                   ASSISTANT_STAGE_ASR_CONNECT,
+                                   ESP_ERR_TIMEOUT, "ASR connection deadline", "");
         }
         if (s_phase == VOICE_RECORDING && s_connected) {
             if (!s_capture_ended) {
                 const size_t got = read_capture(pcm, AUDIO_CHUNK_BYTES, pdMS_TO_TICKS(20));
                 if (got > 0U) {
-                    if (send_asr_audio(pcm, got, false) != ESP_OK) report_error("语音上传失败");
+                    if (send_asr_audio(pcm, got, false) != ESP_OK) {
+                        report_assistant_error(ASSISTANT_ERROR_ASR_FAILED,
+                                               ASSISTANT_STAGE_ASR_STREAM,
+                                               ESP_FAIL, "ASR audio upload failed", "");
+                    }
                     else s_audio_bytes += (uint32_t)got;
                 }
             }
@@ -895,25 +1071,43 @@ static void voice_task(void *arg)
                 for (;;) {
                     const size_t tail = read_capture(pcm, AUDIO_CHUNK_BYTES, 0);
                     if (tail == 0U) break;
-                    if (send_asr_audio(pcm, tail, false) != ESP_OK) { report_error("语音上传失败"); break; }
+                    if (send_asr_audio(pcm, tail, false) != ESP_OK) {
+                        report_assistant_error(ASSISTANT_ERROR_ASR_FAILED,
+                                               ASSISTANT_STAGE_ASR_STREAM,
+                                               ESP_FAIL, "ASR tail upload failed", "");
+                        break;
+                    }
                     s_audio_bytes += (uint32_t)tail;
                 }
                 if (s_phase != VOICE_ERROR) {
                     if (s_audio_bytes < MIN_AUDIO_BYTES) start_unclear_reply();
-                    else if (send_asr_audio(pcm, 0, true) != ESP_OK) report_error("没有有效录音");
-                    else { s_phase = VOICE_ASR; status_set(VOICE_ASSISTANT_THINKING, true, false, "识别中"); s_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(REQUEST_TIMEOUT_MS); }
+                    else if (send_asr_audio(pcm, 0, true) != ESP_OK) {
+                        report_assistant_error(ASSISTANT_ERROR_ASR_FAILED,
+                                               ASSISTANT_STAGE_ASR_STREAM,
+                                               ESP_FAIL, "ASR final frame failed", "");
+                    } else {
+                        s_phase = VOICE_ASR;
+                        status_publish(VOICE_ASSISTANT_THINKING, true, false, "识别中", false);
+                        s_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(REQUEST_TIMEOUT_MS);
+                    }
                 }
             }
         }
-        if (s_phase == VOICE_ASR && xTaskGetTickCount() >= s_deadline) report_error("ASR 响应超时");
+        if (s_phase == VOICE_ASR && xTaskGetTickCount() >= s_deadline) {
+            report_assistant_error(ASSISTANT_ERROR_REQUEST_TIMEOUT,
+                                   ASSISTANT_STAGE_ASR_RESPONSE,
+                                   ESP_ERR_TIMEOUT, "ASR response deadline", "");
+        }
         if (s_phase == VOICE_AGENT) {
             if (s_mode == CLOUD_ASR) clear_client();
             if (s_agent_request_id == 0U) {
                 if (assistant_router_submit(s_final_text, s_level_id, &s_agent_request_id) != ESP_OK) {
-                    report_error("对话服务不可用");
+                    report_assistant_error(ASSISTANT_ERROR_CONNECT_FAILED,
+                                           ASSISTANT_STAGE_BACKEND_CONNECT,
+                                           ESP_FAIL, "assistant submit failed", "");
                 } else {
                     s_agent_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(AGENT_RESPONSE_TIMEOUT_MS);
-                    status_set(VOICE_ASSISTANT_THINKING, true, false, "思考中");
+                    status_publish(VOICE_ASSISTANT_THINKING, true, false, "思考中", false);
                     ESP_LOGI(TAG, "播放等待提示");
                     if (!start_cached_thinking_announcement()) {
                         start_tts_text(THINKING_ANNOUNCEMENT, TTS_KIND_THINKING_ANNOUNCEMENT);
@@ -922,18 +1116,23 @@ static void voice_task(void *arg)
             }
         }
         if ((s_phase == VOICE_TTS || s_phase == VOICE_WAIT_AGENT) && s_agent_request_id != 0U) {
-            const esp_err_t agent_result = poll_agent_result();
-            if (agent_result == ESP_ERR_TIMEOUT) report_error("对话响应超时");
-            else if (agent_result != ESP_OK) report_error("对话服务失败");
+            poll_agent_result();
         }
         if (s_phase == VOICE_TTS && s_cached_thinking_playback &&
             service_cached_thinking_announcement(pcm, AUDIO_CHUNK_BYTES) != ESP_OK) {
-            report_error("本地提示播放失败");
+            report_assistant_error(ASSISTANT_ERROR_TTS_FAILED,
+                                   ASSISTANT_STAGE_TTS_PLAYBACK,
+                                   ESP_FAIL, "cached prompt playback failed", "");
         }
         if (s_phase == VOICE_TTS && !s_cached_thinking_playback && s_mode == CLOUD_ASR) clear_client();
         if (s_phase == VOICE_TTS && !s_cached_thinking_playback &&
             s_client == NULL && !s_playback_finishing) {
-            if (open_cloud(CLOUD_TTS) != ESP_OK) report_error("TTS 连接失败");
+            const esp_err_t open_err = open_cloud(CLOUD_TTS);
+            if (open_err != ESP_OK) {
+                report_assistant_error(ASSISTANT_ERROR_TTS_FAILED,
+                                       ASSISTANT_STAGE_TTS_CONNECT,
+                                       open_err, "TTS websocket open failed", "");
+            }
             else {
                 s_tts_started = false; s_tts_audio_received = false; s_tts_finished = false;
                 s_tts_session_started = false; s_tts_finish_sent = false; s_tts_text_offset = 0U;
@@ -945,11 +1144,17 @@ static void voice_task(void *arg)
             xTaskGetTickCount() >= s_tts_next_request) {
             const char *next = s_tts_text + s_tts_text_offset;
             if (*next == '\0') {
-                if (send_tts_event(102U, true, "{}") != ESP_OK) callback_error("TTS 会话结束失败");
+                if (send_tts_event(102U, true, "{}") != ESP_OK) {
+                    callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                                   ESP_FAIL, "TTS finish session failed");
+                }
                 else s_tts_finish_sent = true;
             } else {
                 const size_t character_len = utf8_character_length(next);
-                if (send_tts_task(next, character_len) != ESP_OK) callback_error("TTS 请求发送失败");
+                if (send_tts_task(next, character_len) != ESP_OK) {
+                    callback_error(ASSISTANT_ERROR_TTS_FAILED, ASSISTANT_STAGE_TTS_STREAM,
+                                   ESP_FAIL, "TTS text request failed");
+                }
                 else {
                     s_tts_text_offset += character_len;
                     s_tts_next_request = xTaskGetTickCount() + pdMS_TO_TICKS(5);
@@ -972,12 +1177,12 @@ static void voice_task(void *arg)
                     start_tts_text(s_agent_reply, TTS_KIND_AGENT_REPLY);
                 } else {
                     s_phase = VOICE_WAIT_AGENT;
-                    status_set(VOICE_ASSISTANT_THINKING, true, false, "思考中");
+                    status_publish(VOICE_ASSISTANT_THINKING, true, false, "思考中", false);
                 }
             } else {
                 s_tts_kind = TTS_KIND_NONE;
                 s_phase = VOICE_READY;
-                status_set(VOICE_ASSISTANT_READY, false, false, "");
+                status_publish(VOICE_ASSISTANT_READY, false, false, "", false);
             }
         }
         if (s_phase == VOICE_WAIT_AGENT && s_agent_reply_ready) {
@@ -987,7 +1192,11 @@ static void voice_task(void *arg)
         }
         if (s_phase == VOICE_TTS && !s_cached_thinking_playback &&
             !s_tts_finished && !s_playback_finishing &&
-            xTaskGetTickCount() >= s_deadline) report_error("TTS 响应超时");
+            xTaskGetTickCount() >= s_deadline) {
+            report_assistant_error(ASSISTANT_ERROR_REQUEST_TIMEOUT,
+                                   ASSISTANT_STAGE_TTS_STREAM,
+                                   ESP_ERR_TIMEOUT, "TTS response deadline", "");
+        }
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
@@ -995,6 +1204,11 @@ static void voice_task(void *arg)
 esp_err_t voice_assistant_init(void)
 {
     memset(&s_status, 0, sizeof(s_status)); s_status.state = VOICE_ASSISTANT_DISABLED;
+    assistant_error_latch_reset(&s_error_latch);
+    s_pending_error_code = ASSISTANT_ERROR_NONE;
+    s_pending_error_stage = ASSISTANT_STAGE_NONE;
+    s_pending_esp_error = ESP_OK;
+    s_pending_error_detail[0] = '\0';
     s_phase = VOICE_READY; s_event_sem = xSemaphoreCreateBinary();
     if (s_event_sem == NULL) return ESP_ERR_NO_MEM;
     thinking_cache_load();
@@ -1012,7 +1226,11 @@ void voice_assistant_update(bool play_active, bool programmer_owns_input, bool k
     s_play_active = play_active; s_programmer_owns_input = programmer_owns_input; s_level_id = level_id;
     const bool pressed = play_active && !programmer_owns_input && key0_pressed;
     const bool press_started = pressed && !s_previous_key_pressed;
-    if (press_started) ++s_press_id;
+    if (press_started) {
+        ++s_press_id;
+        assistant_error_latch_clear_for_retry(&s_error_latch);
+        if (s_phase == VOICE_ERROR) s_phase = VOICE_READY;
+    }
     s_key_pressed = pressed; s_previous_key_pressed = key0_pressed;
     portEXIT_CRITICAL(&s_lock);
     if (play_active && (!s_session_play_active || s_session_level_id != level_id)) {
@@ -1022,15 +1240,19 @@ void voice_assistant_update(bool play_active, bool programmer_owns_input, bool k
     } else if (!play_active && s_session_play_active) {
         assistant_router_end_level_session();
         s_session_play_active = false;
+        portENTER_CRITICAL(&s_lock);
+        assistant_error_latch_clear_for_exit(&s_error_latch);
+        portEXIT_CRITICAL(&s_lock);
+        status_publish(VOICE_ASSISTANT_READY, false, false, "", true);
     }
     if (press_started) {
         ESP_LOGI(TAG, "manual voice pressed level=%u configured=%u",
                  (unsigned)level_id, manual_configured);
     }
     if (press_started && !manual_configured) {
-        status_set(VOICE_ASSISTANT_DISABLED, true, true, "助教未配置");
+        status_publish(VOICE_ASSISTANT_DISABLED, true, true, "助教未配置", true);
     } else if (play_active && !programmer_owns_input && s_phase == VOICE_READY && manual_configured) {
-        status_set(VOICE_ASSISTANT_READY, true, false, "可说话");
+        status_publish(VOICE_ASSISTANT_READY, true, false, "可说话", false);
     }
 }
 
@@ -1061,6 +1283,30 @@ esp_err_t voice_assistant_gameplay_prompt_self_test_run(void)
     }
     if (gameplay_prompt_text(VOICE_GAMEPLAY_PROMPT_COUNT) != NULL) return ESP_FAIL;
     ESP_LOGI(TAG, "gameplay prompt mapping self-test passed");
+    return ESP_OK;
+}
+
+esp_err_t voice_assistant_diagnostics_self_test_run(void)
+{
+    assistant_error_latch_t latch;
+    assistant_error_latch_reset(&latch);
+    assistant_error_latch_raise(&latch, 1000U, ERROR_MINIMUM_VISIBLE_MS,
+                                ASSISTANT_ERROR_CONNECT_FAILED,
+                                ASSISTANT_STAGE_BACKEND_CONNECT,
+                                "后端连接失败");
+    ESP_RETURN_ON_FALSE(assistant_error_latch_blocks_status(&latch, 1001U),
+                        ESP_FAIL, TAG, "thinking status must be blocked");
+    ESP_RETURN_ON_FALSE(!assistant_error_latch_blocks_status(&latch, 7000U),
+                        ESP_FAIL, TAG, "normal status allowed after minimum time");
+    assistant_error_latch_clear_for_retry(&latch);
+    ESP_RETURN_ON_FALSE(!latch.active, ESP_FAIL, TAG, "retry clears error");
+    assistant_error_latch_raise(&latch, 8000U, ERROR_MINIMUM_VISIBLE_MS,
+                                ASSISTANT_ERROR_TTS_FAILED,
+                                ASSISTANT_STAGE_TTS_STREAM,
+                                "语音播放失败");
+    assistant_error_latch_clear_for_exit(&latch);
+    ESP_RETURN_ON_FALSE(!latch.active, ESP_FAIL, TAG, "exit clears error");
+    ESP_LOGI(TAG, "voice assistant diagnostics self-test passed");
     return ESP_OK;
 }
 

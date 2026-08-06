@@ -48,5 +48,6 @@ void voice_assistant_update(bool play_active,
 esp_err_t voice_assistant_request_gameplay_prompt(voice_gameplay_prompt_t prompt);
 
 esp_err_t voice_assistant_gameplay_prompt_self_test_run(void);
+esp_err_t voice_assistant_diagnostics_self_test_run(void);
 
 void voice_assistant_get_status(voice_assistant_status_t *status);
