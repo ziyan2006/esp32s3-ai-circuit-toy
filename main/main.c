@@ -23,6 +23,7 @@
 #include "baseboard_ir.h"
 #include "block_i2c.h"
 #include "audio_self_test.h"
+#include "assistant_diagnostics.h"
 #include "assistant_mode.h"
 #include "assistant_router.h"
 #include "remote_assistant.h"
@@ -508,6 +509,7 @@ void app_main(void)
     ESP_ERROR_CHECK(game_logic_self_test_run());
     ESP_ERROR_CHECK(level_intro_self_test_run());
     ESP_ERROR_CHECK(learning_activity_self_test_run());
+    ESP_ERROR_CHECK(assistant_diagnostics_self_test_run());
     ESP_ERROR_CHECK(assistant_mode_self_test_run());
     ESP_ERROR_CHECK(tuco_agent_context_self_test_run());
     ESP_ERROR_CHECK(run_shooter_self_tests());
