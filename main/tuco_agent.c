@@ -324,6 +324,8 @@ static esp_err_t build_circuit_context(const board_snapshot_t *snapshot,
             cJSON_AddItemToArray(entry, cJSON_CreateString(ssd1315_gate_name(snapshot->slots[slot].gate)));
         }
         cJSON_AddItemToArray(entry, ports);
+        cJSON_AddItemToArray(entry,
+                             cJSON_CreateString(snapshot->slots[slot].role_label));
         cJSON_AddItemToArray(slots, entry);
     }
 
@@ -944,7 +946,7 @@ esp_err_t tuco_agent_init(void)
         .system_prompt = "你是图灵号电路指导员，帮助儿童完成当前电路关卡。"
                          "只能依据circuit_snapshot和历史对话，不能编造硬件、连线或积木。"
                          "circuit_snapshot使用tuco_circuit_v2：board.slots每项是"
-                         "[slot_id,row,column,state,gate_or_raw_id,ports]，ports每项是[port_id,side,role]；"
+                         "[slot_id,row,column,state,gate_or_raw_id,ports,role_label]，ports每项是[port_id,side,role]；"
                          "state为empty、unidentified或present，role为unassigned、unknown、unused、input或output。"
                          "board.edges每项是[port_a,port_b,status]，列出所有实际检测到的连线；"
                          "端口只要出现在任一edge中即视为已连接，不得再次选择。"

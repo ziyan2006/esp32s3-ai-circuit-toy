@@ -21,6 +21,9 @@ typedef enum {
 
 esp_err_t ssd1315_oled_init(i2c_master_dev_handle_t device);
 esp_err_t ssd1315_oled_show_gate(i2c_master_dev_handle_t device, ssd1315_gate_t gate);
+esp_err_t ssd1315_oled_show_gate_with_role(i2c_master_dev_handle_t device,
+                                           ssd1315_gate_t gate,
+                                           const char *role_label);
 esp_err_t ssd1315_oled_show_success(i2c_master_dev_handle_t device);
 bool ssd1315_gate_from_eeprom_id(uint8_t id, ssd1315_gate_t *gate);
 uint8_t ssd1315_gate_to_eeprom_id(ssd1315_gate_t gate);

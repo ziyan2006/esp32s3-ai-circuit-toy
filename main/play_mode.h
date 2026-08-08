@@ -4,5 +4,7 @@
 #include <stdint.h>
 
 void play_mode_set_active(bool active);
+void play_mode_set_level(uint16_t level_id);
 bool play_mode_is_active(void);
 uint32_t play_mode_generation(void);
+uint16_t play_mode_level_id(void);

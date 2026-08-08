@@ -98,6 +98,7 @@ static const uint8_t *glyph_for(char character)
     static const uint8_t glyphs[][5] = {
         ['A' - 'A'] = {0x1E, 0x05, 0x05, 0x1E, 0x00},
         ['B' - 'A'] = {0x1F, 0x15, 0x15, 0x0A, 0x00},
+        ['C' - 'A'] = {0x0E, 0x11, 0x11, 0x0A, 0x00},
         ['D' - 'A'] = {0x1F, 0x11, 0x11, 0x0E, 0x00},
         ['E' - 'A'] = {0x1F, 0x15, 0x15, 0x11, 0x00},
         ['I' - 'A'] = {0x11, 0x1F, 0x11, 0x00, 0x00},
@@ -111,8 +112,17 @@ static const uint8_t *glyph_for(char character)
         ['X' - 'A'] = {0x1B, 0x04, 0x04, 0x1B, 0x00},
         ['Y' - 'A'] = {0x03, 0x04, 0x18, 0x04, 0x03},
     };
+    static const uint8_t digit_glyphs[][5] = {
+        {0x0E, 0x11, 0x13, 0x15, 0x0E},
+        {0x04, 0x0C, 0x04, 0x04, 0x0E},
+        {0x0E, 0x11, 0x06, 0x08, 0x1F},
+        {0x1F, 0x02, 0x06, 0x11, 0x0E},
+    };
 
     if (character < 'A' || character > 'Z') {
+        if (character >= '0' && character <= '3') {
+            return digit_glyphs[character - '0'];
+        }
         return blank;
     }
     return glyphs[character - 'A'];
@@ -134,6 +144,67 @@ static void draw_label(uint8_t *frame, const char *label)
             }
         }
         x += 6;
+    }
+}
+
+static void draw_bitmap_16x16(uint8_t *frame, const uint16_t bitmap[16], int x, int y)
+{
+    for (int row = 0; row < 16; ++row) {
+        for (int column = 0; column < 16; ++column) {
+            if ((bitmap[row] & (uint16_t)(1U << (15 - column))) != 0U) {
+                set_pixel(frame, x + column, y + row, true);
+            }
+        }
+    }
+}
+
+static void draw_role_ascii(uint8_t *frame, char character)
+{
+    const uint8_t *glyph = glyph_for(character);
+    for (int column = 0; column < 5; ++column) {
+        for (int row = 0; row < 5; ++row) {
+            if ((glyph[column] & (1U << row)) == 0U) continue;
+            const int x = 2 + column * 2;
+            const int y = 2 + row * 2;
+            set_pixel(frame, x, y, true);
+            set_pixel(frame, x + 1, y, true);
+            set_pixel(frame, x, y + 1, true);
+            set_pixel(frame, x + 1, y + 1, true);
+        }
+    }
+}
+
+static void draw_role_label(uint8_t *frame, const char *role_label)
+{
+    if (role_label == NULL || role_label[0] == '\0') return;
+
+    static const uint16_t ge_bitmap[16] = {
+        0x0000, 0x0000, 0x0100, 0x0280,
+        0x0640, 0x0C20, 0x3010, 0x610C,
+        0x0100, 0x0100, 0x0100, 0x0100,
+        0x0100, 0x0100, 0x0000, 0x0000,
+    };
+    static const uint16_t jin_bitmap[16] = {
+        0x0000, 0x0000, 0x2120, 0x1120,
+        0x17F8, 0x0120, 0x7120, 0x1120,
+        0x17F8, 0x1120, 0x1320, 0x1620,
+        0x2800, 0x4FF8, 0x0000, 0x0000,
+    };
+    static const uint16_t xuan_bitmap[16] = {
+        0x0000, 0x0000, 0x2140, 0x1340,
+        0x0BF8, 0x0440, 0x7040, 0x17FC,
+        0x10A0, 0x10A4, 0x11A4, 0x133C,
+        0x2800, 0x47FC, 0x0000, 0x0000,
+    };
+
+    if (strcmp(role_label, "个") == 0) {
+        draw_bitmap_16x16(frame, ge_bitmap, 0, 0);
+    } else if (strcmp(role_label, "进") == 0) {
+        draw_bitmap_16x16(frame, jin_bitmap, 0, 0);
+    } else if (strcmp(role_label, "选") == 0) {
+        draw_bitmap_16x16(frame, xuan_bitmap, 0, 0);
+    } else {
+        draw_role_ascii(frame, role_label[0]);
     }
 }
 
@@ -296,9 +367,17 @@ esp_err_t ssd1315_oled_init(i2c_master_dev_handle_t device)
 
 esp_err_t ssd1315_oled_show_gate(i2c_master_dev_handle_t device, ssd1315_gate_t gate)
 {
+    return ssd1315_oled_show_gate_with_role(device, gate, NULL);
+}
+
+esp_err_t ssd1315_oled_show_gate_with_role(i2c_master_dev_handle_t device,
+                                           ssd1315_gate_t gate,
+                                           const char *role_label)
+{
     uint8_t frame[OLED_BUFFER_SIZE] = {0};
     draw_gate_symbol(frame, gate);
     draw_label(frame, ssd1315_gate_name(gate));
+    draw_role_label(frame, role_label);
     return write_frame(device, frame);
 }
 

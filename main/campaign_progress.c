@@ -9,8 +9,44 @@
 static const char *TAG = "campaign_progress";
 
 #define CAMPAIGN_PROGRESS_NAMESPACE "tuco_game"
+#define CAMPAIGN_PROGRESS_CATALOG_VERSION_KEY "catalog_ver"
+#define CAMPAIGN_PROGRESS_CATALOG_VERSION 2U
 
 static nvs_handle_t s_handle;
+
+static esp_err_t migrate_catalog_progress(void)
+{
+    uint8_t catalog_version = 0U;
+    esp_err_t err = nvs_get_u8(s_handle, CAMPAIGN_PROGRESS_CATALOG_VERSION_KEY,
+                               &catalog_version);
+    if (err == ESP_OK && catalog_version >= CAMPAIGN_PROGRESS_CATALOG_VERSION) {
+        return ESP_OK;
+    }
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) return err;
+
+    uint8_t old_full_adder_completed = 0U;
+    err = nvs_get_u8(s_handle, "done_504", &old_full_adder_completed);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) return err;
+
+    err = nvs_erase_key(s_handle, "done_503");
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) return err;
+    err = nvs_erase_key(s_handle, "done_504");
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) return err;
+    if (old_full_adder_completed == 1U) {
+        err = nvs_set_u8(s_handle, "done_503", 1U);
+        if (err != ESP_OK) return err;
+    }
+    err = nvs_set_u8(s_handle, CAMPAIGN_PROGRESS_CATALOG_VERSION_KEY,
+                     CAMPAIGN_PROGRESS_CATALOG_VERSION);
+    if (err != ESP_OK) return err;
+    err = nvs_commit(s_handle);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "migrated campaign catalog to version %u; full adder completed=%u",
+                 CAMPAIGN_PROGRESS_CATALOG_VERSION,
+                 old_full_adder_completed == 1U ? 1U : 0U);
+    }
+    return err;
+}
 
 static esp_err_t ensure_nvs_initialized(void)
 {
@@ -41,6 +77,13 @@ esp_err_t campaign_progress_init(void)
     if (err != ESP_OK) {
         s_handle = 0;
         ESP_LOGE(TAG, "open persistent campaign namespace failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = migrate_catalog_progress();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "migrate persistent campaign catalog failed: %s", esp_err_to_name(err));
+        nvs_close(s_handle);
+        s_handle = 0;
     }
     return err;
 }

@@ -82,7 +82,7 @@ static const level_intro_page_t s_level_502_pages[] = {
     },
 };
 
-static const level_intro_page_t s_level_504_pages[] = {
+static const level_intro_page_t s_level_503_pages[] = {
     {
         .speaker = "图灵号AI",
         .text = "全加器是一个小计算器，可以把三个二进制数字一起相加。",
@@ -110,8 +110,8 @@ uint8_t level_intro_page_count(uint16_t level_id)
         return (uint8_t)(sizeof(s_level_501_pages) / sizeof(s_level_501_pages[0]));
     case 502U:
         return (uint8_t)(sizeof(s_level_502_pages) / sizeof(s_level_502_pages[0]));
-    case 504U:
-        return (uint8_t)(sizeof(s_level_504_pages) / sizeof(s_level_504_pages[0]));
+    case 503U:
+        return (uint8_t)(sizeof(s_level_503_pages) / sizeof(s_level_503_pages[0]));
     default:
         return 0U;
     }
@@ -131,8 +131,8 @@ const level_intro_page_t *level_intro_page_get(uint16_t level_id, uint8_t page_i
         return &s_level_501_pages[page_index];
     case 502U:
         return &s_level_502_pages[page_index];
-    case 504U:
-        return &s_level_504_pages[page_index];
+    case 503U:
+        return &s_level_503_pages[page_index];
     default:
         return NULL;
     }
@@ -150,8 +150,8 @@ esp_err_t level_intro_self_test_run(void)
     const level_intro_page_t *parity_last = level_intro_page_get(501U, 2U);
     const level_intro_page_t *carry_first = level_intro_page_get(502U, 0U);
     const level_intro_page_t *carry_last = level_intro_page_get(502U, 2U);
-    const level_intro_page_t *full_first = level_intro_page_get(504U, 0U);
-    const level_intro_page_t *full_last = level_intro_page_get(504U, 2U);
+    const level_intro_page_t *full_first = level_intro_page_get(503U, 0U);
+    const level_intro_page_t *full_last = level_intro_page_get(503U, 2U);
 
     ESP_RETURN_ON_FALSE(level_intro_page_count(101U) == 3U, ESP_FAIL, TAG,
                         "level 101 intro page count mismatch");
@@ -165,8 +165,10 @@ esp_err_t level_intro_self_test_run(void)
                         "level 501 intro page count mismatch");
     ESP_RETURN_ON_FALSE(level_intro_page_count(502U) == 3U, ESP_FAIL, TAG,
                         "level 502 intro page count mismatch");
-    ESP_RETURN_ON_FALSE(level_intro_page_count(504U) == 3U, ESP_FAIL, TAG,
-                        "level 504 intro page count mismatch");
+    ESP_RETURN_ON_FALSE(level_intro_page_count(503U) == 3U, ESP_FAIL, TAG,
+                        "level 503 intro page count mismatch");
+    ESP_RETURN_ON_FALSE(level_intro_page_count(504U) == 0U, ESP_FAIL, TAG,
+                        "removed level 504 intro still exists");
     ESP_RETURN_ON_FALSE(binary_first != NULL && strstr(binary_first->text, "二进制") != NULL,
                         ESP_FAIL, TAG, "level 401 binary introduction mismatch");
     ESP_RETURN_ON_FALSE(binary_last != NULL && strstr(binary_last->text, "1、2、4、8") != NULL,
@@ -184,9 +186,9 @@ esp_err_t level_intro_self_test_run(void)
     ESP_RETURN_ON_FALSE(carry_last != NULL && strstr(carry_last->text, "1、2、3 块积木") != NULL,
                         ESP_FAIL, TAG, "level 502 carry activity guidance mismatch");
     ESP_RETURN_ON_FALSE(full_first != NULL && strstr(full_first->text, "三个二进制数字") != NULL,
-                        ESP_FAIL, TAG, "level 504 full adder introduction mismatch");
+                        ESP_FAIL, TAG, "level 503 full adder introduction mismatch");
     ESP_RETURN_ON_FALSE(full_last != NULL && strstr(full_last->text, "1 加 1 加 1") != NULL,
-                        ESP_FAIL, TAG, "level 504 carry guidance mismatch");
+                        ESP_FAIL, TAG, "level 503 carry guidance mismatch");
     ESP_RETURN_ON_FALSE(first != NULL && strstr(first->text, "图灵号的机载 AI 助手") != NULL,
                         ESP_FAIL, TAG, "level 101 intro greeting mismatch");
     ESP_RETURN_ON_FALSE(last != NULL && strstr(last->text, "A 和 Y") != NULL,
@@ -197,8 +199,8 @@ esp_err_t level_intro_self_test_run(void)
                         "out-of-range level 501 intro page returned");
     ESP_RETURN_ON_FALSE(level_intro_page_get(502U, 3U) == NULL, ESP_FAIL, TAG,
                         "out-of-range level 502 intro page returned");
-    ESP_RETURN_ON_FALSE(level_intro_page_get(504U, 3U) == NULL, ESP_FAIL, TAG,
-                        "out-of-range level 504 intro page returned");
+    ESP_RETURN_ON_FALSE(level_intro_page_get(503U, 3U) == NULL, ESP_FAIL, TAG,
+                        "out-of-range level 503 intro page returned");
 
     ESP_LOGI(TAG, "level intro self-test passed");
     return ESP_OK;

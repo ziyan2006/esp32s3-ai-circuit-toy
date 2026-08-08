@@ -8,6 +8,7 @@
 #include "cJSON.h"
 #include "assistant_diagnostics.h"
 #include "c6_network_test.h"
+#include "esp_check.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
@@ -29,6 +30,7 @@ static const char *TAG = "remote_assistant";
 typedef struct {
     uint32_t id;
     uint16_t level;
+    bool direct_hint_requested;
     bool has_learning_activity;
     learning_activity_state_t learning_activity;
     char text[REMOTE_REQUEST_TEXT_MAX];
@@ -43,6 +45,39 @@ static uint32_t s_next_id;
 static uint32_t s_active_id;
 static uint32_t s_session_counter;
 static remote_result_t s_result;
+
+static cJSON *create_learning_activity_json(const learning_activity_state_t *state);
+
+static cJSON *build_remote_request_json(const remote_request_t *request,
+                                        cJSON *circuit)
+{
+    if (request == NULL || circuit == NULL) {
+        cJSON_Delete(circuit);
+        return NULL;
+    }
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        cJSON_Delete(circuit);
+        return NULL;
+    }
+    char session[64];
+    snprintf(session, sizeof(session), "fw-%u-%lu", (unsigned)request->level,
+             (unsigned long)s_session_counter);
+    cJSON_AddStringToObject(root, "session_id", session);
+    cJSON_AddStringToObject(root, "user_text", request->text);
+    cJSON_AddBoolToObject(root, "direct_hint_requested",
+                          request->direct_hint_requested);
+    cJSON_AddItemToObject(root, "circuit_snapshot", circuit);
+    if (request->has_learning_activity) {
+        cJSON *activity = create_learning_activity_json(&request->learning_activity);
+        if (activity == NULL) {
+            cJSON_Delete(root);
+            return NULL;
+        }
+        cJSON_AddItemToObject(root, "learning_activity", activity);
+    }
+    return root;
+}
 
 static const char *learning_activity_kind_name(learning_activity_kind_t kind)
 {
@@ -200,11 +235,9 @@ static void request_remote(const remote_request_t *request, assistant_response_t
         finish_elapsed(response, started_us);
         return;
     }
-    cJSON *root = cJSON_CreateObject();
     cJSON *circuit = cJSON_Parse(snapshot);
     cJSON_free(snapshot);
-    if (root == NULL || circuit == NULL) {
-        cJSON_Delete(root);
+    if (circuit == NULL) {
         cJSON_Delete(circuit);
         assistant_response_fail(response, ASSISTANT_ERROR_INVALID_JSON,
                                 ASSISTANT_STAGE_BACKEND_PROTOCOL, ESP_ERR_NO_MEM,
@@ -212,22 +245,13 @@ static void request_remote(const remote_request_t *request, assistant_response_t
         finish_elapsed(response, started_us);
         return;
     }
-    char session[64];
-    snprintf(session, sizeof(session), "fw-%u-%lu", (unsigned)request->level, (unsigned long)s_session_counter);
-    cJSON_AddStringToObject(root, "session_id", session);
-    cJSON_AddStringToObject(root, "user_text", request->text);
-    cJSON_AddItemToObject(root, "circuit_snapshot", circuit);
-    if (request->has_learning_activity) {
-        cJSON *activity = create_learning_activity_json(&request->learning_activity);
-        if (activity == NULL) {
-            cJSON_Delete(root);
-            assistant_response_fail(response, ASSISTANT_ERROR_INVALID_JSON,
-                                    ASSISTANT_STAGE_BACKEND_PROTOCOL, ESP_ERR_NO_MEM,
-                                    0, false, "failed to encode learning activity");
-            finish_elapsed(response, started_us);
-            return;
-        }
-        cJSON_AddItemToObject(root, "learning_activity", activity);
+    cJSON *root = build_remote_request_json(request, circuit);
+    if (root == NULL) {
+        assistant_response_fail(response, ASSISTANT_ERROR_INVALID_JSON,
+                                ASSISTANT_STAGE_BACKEND_PROTOCOL, ESP_ERR_NO_MEM,
+                                0, false, "failed to encode request body");
+        finish_elapsed(response, started_us);
+        return;
     }
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -439,7 +463,10 @@ void remote_assistant_end_level_session(void)
     xSemaphoreGive(s_lock);
 }
 
-esp_err_t remote_assistant_submit(const char *text, uint16_t level_id, uint32_t *out_request_id)
+esp_err_t remote_assistant_submit(const char *text,
+                                  uint16_t level_id,
+                                  bool direct_hint_requested,
+                                  uint32_t *out_request_id)
 {
     if (out_request_id != NULL) *out_request_id = 0U;
     if (s_lock == NULL || text == NULL || text[0] == '\0' || !remote_assistant_is_configured() || !c6_network_is_connected()) return ESP_ERR_INVALID_STATE;
@@ -450,6 +477,7 @@ esp_err_t remote_assistant_submit(const char *text, uint16_t level_id, uint32_t 
     request->id = ++s_next_id;
     if (request->id == 0U) request->id = ++s_next_id;
     request->level = level_id;
+    request->direct_hint_requested = direct_hint_requested;
     request->has_learning_activity = learning_activity_get_state(&request->learning_activity);
     strlcpy(request->text, text, sizeof(request->text));
     s_active_id = request->id;
@@ -462,6 +490,34 @@ esp_err_t remote_assistant_submit(const char *text, uint16_t level_id, uint32_t 
         return ESP_ERR_NO_MEM;
     }
     if (out_request_id != NULL) *out_request_id = request_id;
+    return ESP_OK;
+}
+
+esp_err_t remote_assistant_protocol_self_test_run(void)
+{
+    remote_request_t request = {
+        .id = 1U,
+        .level = 101U,
+        .direct_hint_requested = true,
+    };
+    strlcpy(request.text, "下一步", sizeof(request.text));
+    cJSON *root = build_remote_request_json(&request, cJSON_CreateObject());
+    if (root == NULL) return ESP_FAIL;
+    const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(
+        root, "direct_hint_requested");
+    const bool enabled_ok = cJSON_IsTrue(enabled);
+    cJSON_Delete(root);
+
+    request.direct_hint_requested = false;
+    root = build_remote_request_json(&request, cJSON_CreateObject());
+    if (root == NULL) return ESP_FAIL;
+    const cJSON *disabled = cJSON_GetObjectItemCaseSensitive(
+        root, "direct_hint_requested");
+    const bool disabled_ok = cJSON_IsFalse(disabled);
+    cJSON_Delete(root);
+    ESP_RETURN_ON_FALSE(enabled_ok && disabled_ok, ESP_FAIL, TAG,
+                        "direct hint protocol self-test failed");
+    ESP_LOGI(TAG, "direct hint protocol self-test passed");
     return ESP_OK;
 }
 

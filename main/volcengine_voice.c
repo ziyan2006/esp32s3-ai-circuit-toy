@@ -67,7 +67,6 @@ static voice_assistant_status_t s_status;
 static volatile bool s_play_active;
 static volatile bool s_programmer_owns_input;
 static volatile bool s_key_pressed;
-static volatile bool s_previous_key_pressed;
 static volatile uint32_t s_press_id;
 static volatile uint32_t s_consumed_press_id;
 static volatile uint16_t s_level_id;
@@ -98,6 +97,21 @@ static size_t s_frame_expected;
 static char s_final_text[512];
 static char s_tts_text[sizeof(s_final_text)];
 static char s_agent_reply[sizeof(s_final_text)];
+static bool s_direct_hint_requested;
+static bool direct_hint_once_update(bool press_started,
+                                    bool press_ended,
+                                    bool direct_hint_armed,
+                                    bool *request_value);
+
+static bool direct_hint_once_update(bool press_started,
+                                    bool press_ended,
+                                    bool direct_hint_armed,
+                                    bool *request_value)
+{
+    if (request_value == NULL) return false;
+    if (press_started) *request_value = direct_hint_armed;
+    return press_ended && *request_value;
+}
 static uint32_t s_agent_request_id;
 static bool s_agent_reply_ready;
 static tts_kind_t s_tts_kind;
@@ -1101,7 +1115,16 @@ static void voice_task(void *arg)
         if (s_phase == VOICE_AGENT) {
             if (s_mode == CLOUD_ASR) clear_client();
             if (s_agent_request_id == 0U) {
-                if (assistant_router_submit(s_final_text, s_level_id, &s_agent_request_id) != ESP_OK) {
+                bool direct_hint_requested;
+                portENTER_CRITICAL(&s_lock);
+                direct_hint_requested = s_direct_hint_requested;
+                s_direct_hint_requested = false;
+                portEXIT_CRITICAL(&s_lock);
+                ESP_LOGI(TAG, "submitting assistant request direct_hint=%u",
+                         direct_hint_requested);
+                if (assistant_router_submit(s_final_text, s_level_id,
+                                            direct_hint_requested,
+                                            &s_agent_request_id) != ESP_OK) {
                     report_assistant_error(ASSISTANT_ERROR_CONNECT_FAILED,
                                            ASSISTANT_STAGE_BACKEND_CONNECT,
                                            ESP_FAIL, "assistant submit failed", "");
@@ -1209,7 +1232,8 @@ esp_err_t voice_assistant_init(void)
     s_pending_error_stage = ASSISTANT_STAGE_NONE;
     s_pending_esp_error = ESP_OK;
     s_pending_error_detail[0] = '\0';
-    s_phase = VOICE_READY; s_event_sem = xSemaphoreCreateBinary();
+    s_phase = VOICE_READY; s_direct_hint_requested = false;
+    s_event_sem = xSemaphoreCreateBinary();
     if (s_event_sem == NULL) return ESP_ERR_NO_MEM;
     thinking_cache_load();
     if (!tts_configured()) {
@@ -1219,19 +1243,28 @@ esp_err_t voice_assistant_init(void)
     return ESP_OK;
 }
 
-void voice_assistant_update(bool play_active, bool programmer_owns_input, bool key0_pressed, uint16_t level_id)
+bool voice_assistant_update(bool play_active,
+                            bool programmer_owns_input,
+                            bool key0_pressed,
+                            uint16_t level_id,
+                            bool direct_hint_armed)
 {
     const bool manual_configured = manual_voice_configured();
+    bool direct_hint_dismissed = false;
     portENTER_CRITICAL(&s_lock);
     s_play_active = play_active; s_programmer_owns_input = programmer_owns_input; s_level_id = level_id;
+    const bool was_pressed = s_key_pressed;
     const bool pressed = play_active && !programmer_owns_input && key0_pressed;
-    const bool press_started = pressed && !s_previous_key_pressed;
+    const bool press_started = pressed && !was_pressed;
+    const bool press_ended = !pressed && was_pressed;
     if (press_started) {
         ++s_press_id;
         assistant_error_latch_clear_for_retry(&s_error_latch);
         if (s_phase == VOICE_ERROR) s_phase = VOICE_READY;
     }
-    s_key_pressed = pressed; s_previous_key_pressed = key0_pressed;
+    direct_hint_dismissed = direct_hint_once_update(
+        press_started, press_ended, direct_hint_armed, &s_direct_hint_requested);
+    s_key_pressed = pressed;
     portEXIT_CRITICAL(&s_lock);
     if (play_active && (!s_session_play_active || s_session_level_id != level_id)) {
         assistant_router_begin_level_session(level_id);
@@ -1241,19 +1274,21 @@ void voice_assistant_update(bool play_active, bool programmer_owns_input, bool k
         assistant_router_end_level_session();
         s_session_play_active = false;
         portENTER_CRITICAL(&s_lock);
+        s_direct_hint_requested = false;
         assistant_error_latch_clear_for_exit(&s_error_latch);
         portEXIT_CRITICAL(&s_lock);
         status_publish(VOICE_ASSISTANT_READY, false, false, "", true);
     }
     if (press_started) {
-        ESP_LOGI(TAG, "manual voice pressed level=%u configured=%u",
-                 (unsigned)level_id, manual_configured);
+        ESP_LOGI(TAG, "manual voice pressed level=%u configured=%u direct_hint=%u",
+                 (unsigned)level_id, manual_configured, s_direct_hint_requested);
     }
     if (press_started && !manual_configured) {
         status_publish(VOICE_ASSISTANT_DISABLED, true, true, "助教未配置", true);
     } else if (play_active && !programmer_owns_input && s_phase == VOICE_READY && manual_configured) {
         status_publish(VOICE_ASSISTANT_READY, true, false, "可说话", false);
     }
+    return direct_hint_dismissed;
 }
 
 esp_err_t voice_assistant_request_gameplay_prompt(voice_gameplay_prompt_t prompt)
@@ -1288,6 +1323,26 @@ esp_err_t voice_assistant_gameplay_prompt_self_test_run(void)
 
 esp_err_t voice_assistant_diagnostics_self_test_run(void)
 {
+    bool request_value = false;
+    ESP_RETURN_ON_FALSE(
+        !direct_hint_once_update(false, false, true, &request_value) && !request_value,
+        ESP_FAIL, TAG, "direct hint must wait for a new press");
+    ESP_RETURN_ON_FALSE(
+        !direct_hint_once_update(true, false, false, &request_value) && !request_value,
+        ESP_FAIL, TAG, "disabled direct hint must not be latched");
+    ESP_RETURN_ON_FALSE(
+        !direct_hint_once_update(false, true, false, &request_value) && !request_value,
+        ESP_FAIL, TAG, "disabled direct hint must stay visible state off");
+    ESP_RETURN_ON_FALSE(
+        !direct_hint_once_update(true, false, true, &request_value) && request_value,
+        ESP_FAIL, TAG, "enabled direct hint must latch without closing on press");
+    ESP_RETURN_ON_FALSE(
+        !direct_hint_once_update(false, false, false, &request_value) && request_value,
+        ESP_FAIL, TAG, "enabled direct hint must stay visible while recording");
+    ESP_RETURN_ON_FALSE(
+        direct_hint_once_update(false, true, false, &request_value) && request_value,
+        ESP_FAIL, TAG, "enabled direct hint must close on release");
+
     assistant_error_latch_t latch;
     assistant_error_latch_reset(&latch);
     assistant_error_latch_raise(&latch, 1000U, ERROR_MINIMUM_VISIBLE_MS,

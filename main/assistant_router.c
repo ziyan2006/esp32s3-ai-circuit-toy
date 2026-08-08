@@ -72,12 +72,15 @@ void assistant_router_end_level_session(void)
     s_session_level_id = 0U;
 }
 
-esp_err_t assistant_router_submit(const char *text, uint16_t level_id, uint32_t *out_request_id)
+esp_err_t assistant_router_submit(const char *text,
+                                  uint16_t level_id,
+                                  bool direct_hint_requested,
+                                  uint32_t *out_request_id)
 {
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
     s_active_mode = assistant_mode_get();
     const esp_err_t err = s_active_mode == ASSISTANT_MODE_REMOTE ?
-        remote_assistant_submit(text, level_id, out_request_id) :
+        remote_assistant_submit(text, level_id, direct_hint_requested, out_request_id) :
         tuco_agent_submit(text, level_id, out_request_id);
     if (err == ESP_OK && out_request_id != NULL) s_active_request_id = *out_request_id;
     return err;

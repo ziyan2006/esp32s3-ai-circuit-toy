@@ -20,6 +20,7 @@
 #include "app_ui.h"
 #include "board_mapping.h"
 #include "board_snapshot.h"
+#include "circuit_role_labels.h"
 #include "learning_activity.h"
 #include "play_mode.h"
 
@@ -70,6 +71,7 @@ typedef struct {
     uint8_t miss_count;
     uint8_t raw_id;
     ssd1315_gate_t displayed_gate;
+    char role_label[BOARD_ROLE_LABEL_MAX];
     bool id_valid;
     uint8_t candidate_raw_id;
     ssd1315_gate_t candidate_gate;
@@ -125,6 +127,8 @@ static bool s_programmer_was_present;
 static uint8_t s_programmer_last_id = 0xFFU;
 static uint8_t s_programmer_good_samples;
 static uint8_t s_programmer_bad_samples;
+
+static void baseboard_queue_render(uint8_t slot);
 
 static i2c_master_dev_handle_t add_device(i2c_master_bus_handle_t bus, uint8_t address, uint32_t speed_hz)
 {
@@ -355,6 +359,7 @@ static i2c_master_dev_handle_t baseboard_probe_oled(void)
 static void baseboard_publish_slots(uint32_t completed_scans)
 {
     board_slot_identity_t identities[BOARD_SNAPSHOT_SLOT_COUNT] = {0};
+    bool role_label_changed[BOARD_SNAPSHOT_SLOT_COUNT] = {0};
     portENTER_CRITICAL(&s_slots_lock);
     for (uint8_t slot = 0; slot < SLOT_COUNT; ++slot) {
         identities[slot] = (board_slot_identity_t) {
@@ -365,7 +370,24 @@ static void baseboard_publish_slots(uint32_t completed_scans)
         };
     }
     portEXIT_CRITICAL(&s_slots_lock);
+    circuit_role_labels_assign(play_mode_level_id(), identities);
+
+    portENTER_CRITICAL(&s_slots_lock);
+    for (uint8_t slot = 0; slot < SLOT_COUNT; ++slot) {
+        if (strcmp(s_slots[slot].role_label, identities[slot].role_label) != 0) {
+            role_label_changed[slot] = true;
+            strncpy(s_slots[slot].role_label, identities[slot].role_label,
+                    BOARD_ROLE_LABEL_MAX - 1U);
+            s_slots[slot].role_label[BOARD_ROLE_LABEL_MAX - 1U] = '\0';
+            s_slots[slot].has_rendered = false;
+            s_slots[slot].render_retry_after = 0;
+        }
+    }
+    portEXIT_CRITICAL(&s_slots_lock);
     board_snapshot_publish_slots(identities, completed_scans);
+    for (uint8_t slot = 0; slot < SLOT_COUNT; ++slot) {
+        if (role_label_changed[slot]) baseboard_queue_render(slot);
+    }
 }
 
 static uint8_t baseboard_reset_transient_slot_state(void)
@@ -514,12 +536,15 @@ static void baseboard_oled_task(void *arg)
 
         uint8_t expected_id;
         ssd1315_gate_t expected_gate;
+        char expected_role_label[BOARD_ROLE_LABEL_MAX];
         bool present;
         bool initialized;
         portENTER_CRITICAL(&s_slots_lock);
         present = s_slots[slot].present;
         expected_id = s_slots[slot].raw_id;
         expected_gate = s_slots[slot].displayed_gate;
+        strncpy(expected_role_label, s_slots[slot].role_label, BOARD_ROLE_LABEL_MAX);
+        expected_role_label[BOARD_ROLE_LABEL_MAX - 1U] = '\0';
         initialized = s_slots[slot].oled_initialized;
         portEXIT_CRITICAL(&s_slots_lock);
 
@@ -538,7 +563,10 @@ static void baseboard_oled_task(void *arg)
                         oled = baseboard_probe_oled();
                         err = oled != NULL ? ESP_OK : ESP_ERR_NOT_FOUND;
                         if (err == ESP_OK && !initialized) err = ssd1315_oled_init(oled);
-                        if (err == ESP_OK) err = ssd1315_oled_show_gate(oled, expected_gate);
+                        if (err == ESP_OK) {
+                            err = ssd1315_oled_show_gate_with_role(
+                                oled, expected_gate, expected_role_label);
+                        }
                         baseboard_deselect_slot(slot);
                     } else {
                         baseboard_disable_all_channels();
@@ -566,7 +594,8 @@ static void baseboard_oled_task(void *arg)
         portENTER_CRITICAL(&s_slots_lock);
         slot_state_t *state = &s_slots[slot];
         identity_still_matches = state->present && state->raw_id == expected_id &&
-                                 state->displayed_gate == expected_gate;
+                                 state->displayed_gate == expected_gate &&
+                                 strcmp(state->role_label, expected_role_label) == 0;
         state->render_queued = false;
         if (err == ESP_OK && identity_still_matches) {
             state->oled_present = true;
@@ -583,6 +612,8 @@ static void baseboard_oled_task(void *arg)
                                         pdMS_TO_TICKS(baseboard_render_retry_ms(state->render_failures));
         }
         portEXIT_CRITICAL(&s_slots_lock);
+
+        if (!identity_still_matches) baseboard_queue_render(slot);
 
         if (err == ESP_OK && identity_still_matches) {
             const board_slot_mapping_t *mapping = board_mapping_slot(slot);

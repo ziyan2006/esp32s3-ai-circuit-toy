@@ -180,6 +180,8 @@ typedef struct {
     lv_obj_t *play_action_label;
     lv_obj_t *play_debug_action;
     lv_obj_t *play_debug_action_label;
+    lv_obj_t *play_direct_hint;
+    lv_obj_t *play_direct_hint_label;
     lv_obj_t *success_code;
     lv_obj_t *success_title;
     lv_obj_t *success_status;
@@ -233,6 +235,7 @@ static uint32_t s_play_judge_version;
 static uint32_t s_play_debug_generation;
 static uint32_t s_play_voice_generation;
 static bool s_programmer_owns_input;
+static bool s_direct_hint_armed;
 static char s_play_goal_text[384];
 static int64_t s_last_play_health_log_us;
 static bool s_play_invalid_link_prompt_active;
@@ -1624,7 +1627,7 @@ static void ui_refresh_learning_activity(void)
                               ui_learning_bit(state.bits, state.slot_count, 2U),
                               ui_learning_bit(state.bits, state.slot_count, 3U));
     } else if (is_three_input_parity) {
-        lv_label_set_text_fmt(s_ui.learning_round, "三路求和训练  %u / %u",
+        lv_label_set_text_fmt(s_ui.learning_round, "个位引擎训练  %u / %u",
                               (unsigned)(state.round_index + 1U), (unsigned)state.round_total);
         lv_label_set_text_fmt(s_ui.learning_title, "让个位结果变成 %u",
                               (unsigned)state.target_decimal);
@@ -2452,6 +2455,31 @@ static void ui_toggle_debug_event_cb(lv_event_t *event)
     ui_toggle_debug();
 }
 
+static void ui_refresh_direct_hint(void)
+{
+    if (s_ui.play_direct_hint == NULL || s_ui.play_direct_hint_label == NULL) return;
+    lv_obj_set_style_bg_color(s_ui.play_direct_hint,
+                              lv_color_hex(s_direct_hint_armed ? UI_COLOR_YELLOW : UI_COLOR_SURFACE), 0);
+    lv_obj_set_style_border_color(s_ui.play_direct_hint,
+                                  lv_color_hex(s_direct_hint_armed ? UI_COLOR_YELLOW : UI_COLOR_BORDER), 0);
+    lv_obj_set_style_border_width(s_ui.play_direct_hint, s_direct_hint_armed ? 2 : 1, 0);
+    lv_obj_set_style_radius(s_ui.play_direct_hint, 2, 0);
+    lv_obj_set_style_bg_color(s_ui.play_direct_hint, lv_color_hex(UI_COLOR_CYAN_DIM), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(s_ui.play_direct_hint, lv_color_hex(UI_COLOR_CYAN), LV_STATE_PRESSED);
+    lv_label_set_text(s_ui.play_direct_hint_label,
+                      s_direct_hint_armed ? "直接提示  开启" : "直接提示  关闭");
+    lv_obj_set_style_text_color(s_ui.play_direct_hint_label,
+                                lv_color_hex(s_direct_hint_armed ? UI_COLOR_BG : UI_COLOR_TEXT), 0);
+}
+
+static void ui_direct_hint_event_cb(lv_event_t *event)
+{
+    (void)event;
+    s_direct_hint_armed = !s_direct_hint_armed;
+    audio_self_test_play_effect(AUDIO_EFFECT_SELECT);
+    ui_refresh_direct_hint();
+}
+
 static void ui_record_node_completion(uint16_t index)
 {
     if (index >= s_node_count || s_completed_nodes[index]) return;
@@ -2644,6 +2672,15 @@ static void ui_create_play_screen(void)
     ui_add_pixel_corners(s_ui.play_circuit, UI_COLOR_CYAN);
     lv_obj_add_event_cb(s_ui.play_circuit, ui_circuit_draw_event_cb, LV_EVENT_DRAW_MAIN, NULL);
     ui_create_label(s_ui.play_circuit, "实时电路", 18, 12, 180, UI_COLOR_CYAN);
+
+    s_ui.play_direct_hint = lv_button_create(s_ui.play_circuit);
+    lv_obj_set_pos(s_ui.play_direct_hint, 458, 8);
+    lv_obj_set_size(s_ui.play_direct_hint, 184, 36);
+    lv_obj_add_event_cb(s_ui.play_direct_hint, ui_direct_hint_event_cb, LV_EVENT_CLICKED, NULL);
+    s_ui.play_direct_hint_label = lv_label_create(s_ui.play_direct_hint);
+    ui_set_compact_font(s_ui.play_direct_hint_label);
+    lv_obj_center(s_ui.play_direct_hint_label);
+    ui_refresh_direct_hint();
 
     lv_obj_t *side = ui_create_panel(screen, 694, 90, 312, 492);
     ui_add_pixel_corners(side, UI_COLOR_YELLOW);
@@ -3111,11 +3148,17 @@ static void ui_load_page(ui_page_t page)
     if (page >= UI_PAGE_COUNT || s_ui.screen[page] == NULL) {
         return;
     }
+    if ((page == UI_PAGE_PLAY && s_page != UI_PAGE_PLAY) ||
+        (s_page == UI_PAGE_PLAY && page != UI_PAGE_PLAY)) {
+        s_direct_hint_armed = false;
+        ui_refresh_direct_hint();
+    }
     const bool old_play_page = s_page == UI_PAGE_PLAY || s_page == UI_PAGE_SUCCESS;
     const bool new_play_page = page == UI_PAGE_PLAY || page == UI_PAGE_SUCCESS;
     if (!old_play_page && new_play_page) {
         circuit_debug_reset();
         board_snapshot_reset(true);
+        play_mode_set_level(ui_nodes()[s_selected_node].id);
         play_mode_set_active(true);
         game_judge_reset();
         s_play_snapshot_generation = UINT32_MAX;
@@ -3133,6 +3176,7 @@ static void ui_load_page(ui_page_t page)
         circuit_debug_reset();
         game_judge_cancel("检查已经停止");
         play_mode_set_active(false);
+        play_mode_set_level(0U);
         board_snapshot_reset(false);
     }
     if (s_page == UI_PAGE_LEARNING_ACTIVITY && page != UI_PAGE_LEARNING_ACTIVITY) {
@@ -3240,14 +3284,21 @@ static esp_err_t ui_campaign_progression_self_test(void)
     const int32_t level203 = ui_find_node_index(nodes, s_node_count, 203U);
     const int32_t level301 = ui_find_node_index(nodes, s_node_count, 301U);
     const int32_t level302 = ui_find_node_index(nodes, s_node_count, 302U);
+    const int32_t level503 = ui_find_node_index(nodes, s_node_count, 503U);
+    const int32_t level504 = ui_find_node_index(nodes, s_node_count, 504U);
     const int32_t level550 = ui_find_node_index(nodes, s_node_count, 550U);
     const int32_t level602 = ui_find_node_index(nodes, s_node_count, 602U);
     const int32_t level650 = ui_find_node_index(nodes, s_node_count, 650U);
 
     if (s_node_count > UI_MAX_NODES || level101 < 0 || level102 < 0 || level103 < 0 ||
         level150 < 0 || level201 < 0 || level202 < 0 || level203 < 0 ||
-        level301 < 0 || level302 < 0 ||
+        level301 < 0 || level302 < 0 || level503 < 0 || level504 >= 0 ||
         level550 < 0 || level602 < 0 || level650 < 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (nodes[level503].prerequisite_count != 1U ||
+        nodes[level503].prerequisite_ids[0] != 502U ||
+        strcmp(nodes[level503].title, "全加主控") != 0) {
         return ESP_ERR_INVALID_STATE;
     }
     if (!ui_gate_is_unlocked_for_progress(SSD1315_GATE_INPUT, completed) ||
@@ -3477,11 +3528,18 @@ esp_err_t app_ui_update(const key_input_state_t *keys,
     if (keys == NULL || joystick == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    voice_assistant_update(s_page == UI_PAGE_PLAY || s_page == UI_PAGE_LEARNING_ACTIVITY,
-                           programmer_owns_input,
-                           keys->key0_pressed,
-                           ui_nodes()[s_selected_node].id);
+    const bool direct_hint_dismissed = voice_assistant_update(
+        s_page == UI_PAGE_PLAY || s_page == UI_PAGE_LEARNING_ACTIVITY,
+        programmer_owns_input,
+        keys->key0_pressed,
+        ui_nodes()[s_selected_node].id,
+        s_page == UI_PAGE_PLAY && s_direct_hint_armed);
     ESP_RETURN_ON_ERROR(esp_lv_adapter_lock(-1), TAG, "lock LVGL");
+
+    if (direct_hint_dismissed) {
+        s_direct_hint_armed = false;
+        ui_refresh_direct_hint();
+    }
 
     if (s_programmer_owns_input != programmer_owns_input) {
         s_programmer_owns_input = programmer_owns_input;

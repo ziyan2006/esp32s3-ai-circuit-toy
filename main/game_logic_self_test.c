@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "circuit_layout.h"
+#include "circuit_role_labels.h"
 #include "circuit_debug.h"
 #include "circuit_logic.h"
 #include "esp_check.h"
@@ -55,7 +56,7 @@ static esp_err_t test_rule_catalog(void)
 {
     static const uint16_t ids[] = {
         101, 102, 103, 201, 202, 203, 301, 302, 401,
-        402, 403, 501, 502, 503, 504, 601, 602,
+        402, 403, 501, 502, 503, 601, 602,
     };
     for (size_t index = 0; index < sizeof(ids) / sizeof(ids[0]); ++index) {
         const level_rule_t *rule = level_rule_get(ids[index]);
@@ -74,10 +75,12 @@ static esp_err_t test_rule_catalog(void)
                             carry->expected_outputs[4] == 0U,
                         ESP_FAIL, TAG, "carry truth table ordering");
     static const uint8_t full_adder_expected[8] = {0, 1, 1, 2, 1, 2, 2, 3};
-    ESP_RETURN_ON_FALSE(memcmp(level_rule_get(504)->expected_outputs,
+    ESP_RETURN_ON_FALSE(level_rule_get(504) == NULL, ESP_FAIL, TAG,
+                        "removed level 504 rule still exists");
+    ESP_RETURN_ON_FALSE(memcmp(level_rule_get(503)->expected_outputs,
                                full_adder_expected, sizeof(full_adder_expected)) == 0,
                         ESP_FAIL, TAG, "full adder truth table");
-    ESP_RETURN_ON_FALSE(level_rule_get(504)->expected_outputs[7] == 3U, ESP_FAIL, TAG,
+    ESP_RETURN_ON_FALSE(level_rule_get(503)->expected_outputs[7] == 3U, ESP_FAIL, TAG,
                         "full adder all inputs high");
     static const uint8_t mux_expected[8] = {0, 1, 0, 1, 0, 0, 1, 1};
     ESP_RETURN_ON_FALSE(memcmp(level_rule_get(601)->expected_outputs,
@@ -87,6 +90,103 @@ static esp_err_t test_rule_catalog(void)
     ESP_RETURN_ON_FALSE(memcmp(level_rule_get(602)->expected_outputs,
                                decoder_expected, sizeof(decoder_expected)) == 0,
                         ESP_FAIL, TAG, "decoder truth table");
+    return ESP_OK;
+}
+
+static esp_err_t test_role_labels(void)
+{
+    board_snapshot_t snapshot = {0};
+
+    add_slot(&snapshot, 0, SSD1315_GATE_OUTPUT);
+    add_slot(&snapshot, 6, SSD1315_GATE_INPUT);
+    add_slot(&snapshot, 7, SSD1315_GATE_INPUT);
+    circuit_role_labels_assign(401U, snapshot.slots);
+    ESP_RETURN_ON_FALSE(strcmp(snapshot.slots[6].role_label, "A") == 0 &&
+                            strcmp(snapshot.slots[7].role_label, "B") == 0 &&
+                            strcmp(snapshot.slots[0].role_label, "个") == 0,
+                        ESP_FAIL, TAG, "401 roles");
+
+    circuit_role_labels_assign(402U, snapshot.slots);
+    ESP_RETURN_ON_FALSE(strcmp(snapshot.slots[6].role_label, "A") == 0 &&
+                            strcmp(snapshot.slots[7].role_label, "B") == 0 &&
+                            strcmp(snapshot.slots[0].role_label, "进") == 0,
+                        ESP_FAIL, TAG, "402 roles");
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    add_slot(&snapshot, 0, SSD1315_GATE_OUTPUT);
+    add_slot(&snapshot, 6, SSD1315_GATE_INPUT);
+    add_slot(&snapshot, 7, SSD1315_GATE_INPUT);
+    add_slot(&snapshot, 8, SSD1315_GATE_INPUT);
+
+    circuit_role_labels_assign(601U, snapshot.slots);
+
+    ESP_RETURN_ON_FALSE(strcmp(snapshot.slots[6].role_label, "A") == 0, ESP_FAIL, TAG,
+                        "601 first input role");
+    ESP_RETURN_ON_FALSE(strcmp(snapshot.slots[7].role_label, "B") == 0, ESP_FAIL, TAG,
+                        "601 second input role");
+    ESP_RETURN_ON_FALSE(strcmp(snapshot.slots[8].role_label, "选") == 0, ESP_FAIL, TAG,
+                        "601 select input role");
+    ESP_RETURN_ON_FALSE(strcmp(snapshot.slots[0].role_label, "Y") == 0, ESP_FAIL, TAG,
+                        "601 output role");
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    add_slot(&snapshot, 0, SSD1315_GATE_OUTPUT);
+    add_slot(&snapshot, 1, SSD1315_GATE_OUTPUT);
+    add_slot(&snapshot, 6, SSD1315_GATE_INPUT);
+    circuit_role_labels_assign(403U, snapshot.slots);
+    ESP_RETURN_ON_FALSE(snapshot.slots[6].role_label[0] == '\0' &&
+                            snapshot.slots[0].role_label[0] == '\0',
+                        ESP_FAIL, TAG, "403 incomplete roles hidden");
+
+    add_slot(&snapshot, 7, SSD1315_GATE_INPUT);
+    circuit_role_labels_assign(403U, snapshot.slots);
+    ESP_RETURN_ON_FALSE(strcmp(snapshot.slots[6].role_label, "A") == 0 &&
+                            strcmp(snapshot.slots[7].role_label, "B") == 0 &&
+                            strcmp(snapshot.slots[0].role_label, "个") == 0 &&
+                            strcmp(snapshot.slots[1].role_label, "进") == 0,
+                        ESP_FAIL, TAG, "403 roles");
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    add_slot(&snapshot, 0, SSD1315_GATE_OUTPUT);
+    add_slot(&snapshot, 6, SSD1315_GATE_INPUT);
+    add_slot(&snapshot, 7, SSD1315_GATE_INPUT);
+    add_slot(&snapshot, 8, SSD1315_GATE_INPUT);
+    circuit_role_labels_assign(501U, snapshot.slots);
+    ESP_RETURN_ON_FALSE(strcmp(snapshot.slots[6].role_label, "A") == 0 &&
+                            strcmp(snapshot.slots[7].role_label, "B") == 0 &&
+                            strcmp(snapshot.slots[8].role_label, "C") == 0 &&
+                            strcmp(snapshot.slots[0].role_label, "个") == 0,
+                        ESP_FAIL, TAG, "501 roles");
+
+    circuit_role_labels_assign(502U, snapshot.slots);
+    ESP_RETURN_ON_FALSE(strcmp(snapshot.slots[6].role_label, "A") == 0 &&
+                            strcmp(snapshot.slots[7].role_label, "B") == 0 &&
+                            strcmp(snapshot.slots[8].role_label, "C") == 0 &&
+                            strcmp(snapshot.slots[0].role_label, "进") == 0,
+                        ESP_FAIL, TAG, "502 roles");
+
+    add_slot(&snapshot, 1, SSD1315_GATE_OUTPUT);
+    circuit_role_labels_assign(503U, snapshot.slots);
+    ESP_RETURN_ON_FALSE(strcmp(snapshot.slots[6].role_label, "A") == 0 &&
+                            strcmp(snapshot.slots[7].role_label, "B") == 0 &&
+                            strcmp(snapshot.slots[8].role_label, "C") == 0 &&
+                            strcmp(snapshot.slots[0].role_label, "个") == 0 &&
+                            strcmp(snapshot.slots[1].role_label, "进") == 0,
+                        ESP_FAIL, TAG, "503 roles");
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    add_slot(&snapshot, 0, SSD1315_GATE_OUTPUT);
+    add_slot(&snapshot, 1, SSD1315_GATE_OUTPUT);
+    add_slot(&snapshot, 2, SSD1315_GATE_OUTPUT);
+    add_slot(&snapshot, 3, SSD1315_GATE_OUTPUT);
+    add_slot(&snapshot, 6, SSD1315_GATE_INPUT);
+    add_slot(&snapshot, 7, SSD1315_GATE_INPUT);
+    circuit_role_labels_assign(602U, snapshot.slots);
+    ESP_RETURN_ON_FALSE(strcmp(snapshot.slots[6].role_label, "A") == 0 &&
+                            strcmp(snapshot.slots[7].role_label, "B") == 0 &&
+                            strcmp(snapshot.slots[0].role_label, "0") == 0 &&
+                            strcmp(snapshot.slots[3].role_label, "3") == 0,
+                        ESP_FAIL, TAG, "602 roles");
     return ESP_OK;
 }
 
@@ -367,6 +467,7 @@ esp_err_t game_logic_self_test_run(void)
 {
     ESP_RETURN_ON_ERROR(board_mapping_validate(), TAG, "board mapping");
     ESP_RETURN_ON_ERROR(test_rule_catalog(), TAG, "rule catalog");
+    ESP_RETURN_ON_ERROR(test_role_labels(), TAG, "role labels");
     ESP_RETURN_ON_ERROR(test_direct_and_gates(), TAG, "circuit evaluator");
     ESP_RETURN_ON_ERROR(test_input_four_port_fanout(), TAG, "input fanout");
     ESP_RETURN_ON_ERROR(test_debug_signal_and_fixed_inputs(), TAG, "circuit debug");

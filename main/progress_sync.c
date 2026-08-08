@@ -16,7 +16,7 @@
 
 static const char *TAG = "progress_sync";
 
-#define PROGRESS_SYNC_LEVEL_COUNT 16U
+#define PROGRESS_SYNC_LEVEL_COUNT 15U
 #define PROGRESS_SYNC_RESPONSE_CAPACITY 4096U
 #define PROGRESS_SYNC_TIMEOUT_MS 12000U
 #define PROGRESS_SYNC_ASYNC_POLL_MS 20U
@@ -43,7 +43,7 @@ static const progress_sync_level_t s_levels[PROGRESS_SYNC_LEVEL_COUNT] = {
     {301U, "Level 3-1"}, {302U, "Level 3-2"},
     {401U, "Level 4-1"}, {402U, "Level 4-2"}, {403U, "Level 4-3"},
     {501U, "Level 5-1"}, {502U, "Level 5-2"}, {503U, "Level 5-3"},
-    {504U, "Level 5-4"}, {601U, "Level 6-1"}, {602U, "Level 6-2"},
+    {601U, "Level 6-1"}, {602U, "Level 6-2"},
 };
 
 static SemaphoreHandle_t s_mutex;

@@ -527,6 +527,7 @@ void app_main(void)
     ESP_ERROR_CHECK(audio_self_test_init());
     ESP_ERROR_CHECK(tuco_agent_init());
     ESP_ERROR_CHECK(remote_assistant_init());
+    ESP_ERROR_CHECK(remote_assistant_protocol_self_test_run());
     ESP_ERROR_CHECK(assistant_router_init());
     ESP_ERROR_CHECK(assistant_router_self_test_run());
     tuco_agent_serial_start();

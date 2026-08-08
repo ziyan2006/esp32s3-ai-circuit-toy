@@ -40,7 +40,8 @@ static void serial_agent_task(void *arg)
             if (strncmp(line, "/agent ", 7U) != 0 || line[7] == '\0') continue;
 
             uint32_t request_id = 0U;
-            const esp_err_t submit = assistant_router_submit(line + 7U, 101U, &request_id);
+            const esp_err_t submit = assistant_router_submit(
+                line + 7U, 101U, false, &request_id);
             if (submit != ESP_OK) {
                 ESP_LOGW(TAG, "serial request rejected: %s", esp_err_to_name(submit));
                 continue;

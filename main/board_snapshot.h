@@ -13,6 +13,7 @@
 #define BOARD_SNAPSHOT_MAX_LINKS        BOARD_SNAPSHOT_PORT_COUNT
 #define BOARD_SNAPSHOT_PALETTE_SIZE     (BOARD_SNAPSHOT_PORT_COUNT / 2U)
 #define BOARD_SNAPSHOT_INVALID_COLOR    UINT8_MAX
+#define BOARD_ROLE_LABEL_MAX            8U
 
 typedef enum {
     BOARD_PORT_UNUSED = 0,
@@ -33,6 +34,7 @@ typedef struct {
     bool id_valid;
     uint8_t raw_id;
     ssd1315_gate_t gate;
+    char role_label[BOARD_ROLE_LABEL_MAX];
 } board_slot_identity_t;
 
 typedef struct {

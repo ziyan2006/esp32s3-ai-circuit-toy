@@ -36,10 +36,11 @@ typedef struct {
 esp_err_t voice_assistant_init(void);
 
 /* Called from the existing input/UI update path. It never waits for Wi-Fi or TLS. */
-void voice_assistant_update(bool play_active,
+bool voice_assistant_update(bool play_active,
                             bool programmer_owns_input,
                             bool key0_pressed,
-                            uint16_t level_id);
+                            uint16_t level_id,
+                            bool direct_hint_armed);
 
 /*
  * Queue one low-priority fixed gameplay prompt. It never invokes ASR or an
