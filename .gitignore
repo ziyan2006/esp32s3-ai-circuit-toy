@@ -1,6 +1,7 @@
 # ESP-IDF generated output and downloaded components
 /build/
 /managed_components/
+sdkconfig
 sdkconfig.old
 
 # Local credentials
